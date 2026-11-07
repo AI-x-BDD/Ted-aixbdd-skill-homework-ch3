@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>我的預約</title>
+    <link rel="stylesheet" href="proto.css" />
+    <style>
+      .rebook-line {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        align-items: flex-start;
+        margin-top: 8px;
+      }
+      .rebook-line .hint {
+        margin: 0;
+        font-size: 14px;
+        color: var(--text);
+      }
+      @media (min-width: 768px) {
+        .rebook-line {
+          flex-direction: row;
+          align-items: center;
+          gap: 12px;
+        }
+      }
+      .note-proto {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 0 0 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("bookings.html");
+        var suspended = q.get("suspended") === "1";
+        var SUSPEND_UNTIL_DATE = "2026-11-12"; // 台北日期，由暫停解除時間（UTC）換算
+        var SUSPEND_UNTIL_TEXT = "2026年11月12日（週四）10:30";
+
+        /* 假資料：涵蓋七個狀態代碼（C-SH-01）；venueActive 為內層提供的場地啟用狀態 */
+        var data = [
+          { id: "b1", venue: "201 會議室", date: "2026-11-09", s: "10:00", e: "11:00", subject: "產品週會", n: 6, status: "confirmed", venueActive: true },
+          { id: "b2", venue: "大會議室", date: "2026-11-12", s: "14:00", e: "16:00", subject: "客戶簡報", n: 12, status: "pending", venueActive: true },
+          { id: "b3", venue: "小型討論室 A", date: "2026-11-07", s: "13:00", e: "15:00", subject: "一對一", n: 2, status: "checked_in", venueActive: true },
+          { id: "b4", venue: "小型討論室 A", date: "2026-11-17", s: "09:30", e: "10:30", subject: "一對一", n: 2, status: "pending", series: [2, 4], venueActive: true },
+          { id: "b5", venue: "培訓教室", date: "2026-10-28", s: "13:00", e: "15:00", subject: "新人訓練", n: 25, status: "completed", past: true, venueActive: true },
+          { id: "b6", venue: "201 會議室", date: "2026-10-30", s: "09:00", e: "10:00", subject: "專案同步", n: 5, status: "cancelled", past: true, venueActive: true, why: "取消原因：本人取消（由陳小明取消）" },
+          { id: "b7", venue: "大會議室", date: "2026-11-02", s: "15:00", e: "16:00", subject: "部門會議", n: 15, status: "rejected", past: true, venueActive: true, why: "駁回原因：該時段已保留給公司活動，請改選其他時段。" },
+          { id: "b8", venue: "201 會議室", date: "2026-11-04", s: "10:00", e: "11:00", subject: "設計討論", n: 4, status: "no_show", past: true, venueActive: true },
+          { id: "b9", venue: "多功能活動室", date: "2026-10-20", s: "14:00", e: "16:00", subject: "活動籌備", n: 20, status: "completed", past: true, venueActive: false },
+          { id: "q1", venue: "小型討論室 A", date: "2026-10-14", s: "10:00", e: "11:00", subject: "產品週會", n: 6, status: "completed", past: true, venueActive: true }
+        ];
+        /* 再預約成功建立的新預約（跨頁暫存於 sessionStorage，只為原型示範） */
+        var created = [];
+        try {
+          created = JSON.parse(sessionStorage.getItem("rebook-proto:created") || "[]");
+        } catch (e) {}
+        created.forEach(function (c) {
+          data.push(c);
+        });
+        data.sort(function (a, b) {
+          return a.date + a.s < b.date + b.s ? -1 : 1;
+        });
+
+        var tab = q.get("tab") === "past" ? "past" : "upcoming";
+        var root = h("div", { tid: "my-bookings" });
+        main.appendChild(root);
+        root.appendChild(P.header("我的預約"));
+        if (suspended)
+          root.appendChild(
+            h("div", {
+              class: "alert warn",
+              tid: "suspension-banner",
+              role: "status",
+              text: "您的預約權限已暫停至 " + SUSPEND_UNTIL_TEXT + "。暫停期間無法新增預約、登記候補與確認遞補。"
+            })
+          );
+        root.appendChild(
+          h("p", {
+            class: "note-proto",
+            text: "原型說明：取消、修改、報到等 001 既有按鈕不在本原型內，只呈現本功能新增的「再預約一次」。"
+          })
+        );
+        var tabs = h(
+          "div",
+          { class: "tabs", role: "tablist" },
+          h("button", { role: "tab", tid: "my-bookings-tab-upcoming", text: "即將到來", onclick: function () { tab = "upcoming"; draw(); } }),
+          h("button", { role: "tab", tid: "my-bookings-tab-past", text: "已結束", onclick: function () { tab = "past"; draw(); } })
+        );
+        root.appendChild(tabs);
+        var out = h("div");
+        root.appendChild(out);
+
+        /* 按鈕可否按：暫停優先於場地停用 */
+        function rebookState(b) {
+          if (suspended)
+            return { ok: false, why: "預約權限暫停中，" + SUSPEND_UNTIL_DATE + " 解除" };
+          if (!b.venueActive) return { ok: false, why: "此場地已停用，無法再預約" };
+          return { ok: true };
+        }
+
+        function item(b) {
+          var li = h("li", {
+            class: "item",
+            tid: "my-bookings-item",
+            "data-id": b.id,
+            "aria-label": b.venue + "，" + P.fmtDate(b.date) + " " + b.s + "–" + b.e + "，" + P.statusText(b.status)
+          });
+          li.appendChild(
+            h(
+              "div",
+              { class: "top" },
+              h("span", { class: "title", text: b.venue }),
+              h("span", null, P.statusTag(b.status), b.series ? [" ", h("span", { class: "tag", text: "第 " + b.series[0] + "／" + b.series[1] + " 場" })] : null)
+            )
+          );
+          li.appendChild(h("div", { class: "meta", text: P.fmtDate(b.date) + " " + b.s + "–" + b.e }));
+          li.appendChild(h("div", { class: "meta", text: b.subject + "，" + b.n + " 人" }));
+          if (b.why) li.appendChild(h("div", { class: "meta", style: "color:var(--danger)", text: b.why }));
+          var st = rebookState(b);
+          var line = h("div", { class: "rebook-line" });
+          var btn = h("button", {
+            class: "btn sm",
+            type: "button",
+            tid: "booking-rebook-button",
+            "aria-label": "再預約一次：" + b.venue + "，" + b.subject,
+            disabled: !st.ok,
+            "aria-describedby": st.ok ? null : "why-" + b.id,
+            text: "再預約一次",
+            onclick: function () {
+              location.href = P.link("booking-form.html", "from=" + encodeURIComponent(b.id));
+            }
+          });
+          line.appendChild(btn);
+          if (!st.ok)
+            line.appendChild(h("span", { class: "hint", tid: "booking-rebook-reason", id: "why-" + b.id, text: st.why }));
+          li.appendChild(line);
+          return li;
+        }
+
+        function draw() {
+          tabs.children[0].setAttribute("aria-selected", tab === "upcoming");
+          tabs.children[1].setAttribute("aria-selected", tab === "past");
+          out.innerHTML = "";
+          if (P.state === "loading") {
+            out.setAttribute("aria-busy", "true");
+            out.appendChild(P.skeleton(4, "my-bookings-loading"));
+            return;
+          }
+          out.removeAttribute("aria-busy");
+          if (P.state === "error") {
+            out.appendChild(
+              P.stateBox("error", "my-bookings-error", "無法載入你的預約", "無法載入你的預約。請稍後按「重新載入」再試一次。", [P.reloadBtn()])
+            );
+            return;
+          }
+          var list = P.state === "empty" ? [] : data.filter(function (b) { return tab === "past" ? b.past : !b.past; });
+          if (tab === "past")
+            list.sort(function (a, b) { return a.date + a.s < b.date + b.s ? 1 : -1; });
+          if (!list.length) {
+            out.appendChild(
+              tab === "upcoming"
+                ? P.stateBox("empty", "my-bookings-empty", "目前沒有即將到來的預約", "到「場地」查詢空間，就能建立第一筆預約。")
+                : P.stateBox("empty", "my-bookings-empty", "還沒有已結束的預約", "已結束的預約會顯示在這裡。")
+            );
+            return;
+          }
+          var ul = h("ul", { class: "list", tid: "my-bookings-list" });
+          list.forEach(function (b) { ul.appendChild(item(b)); });
+          out.appendChild(ul);
+        }
+        draw();
+
+        /* 再預約成功導回：頂部提示含新預約狀態 */
+        var rb = q.get("rebooked");
+        if (rb === "confirmed") P.toast("已為你預約，狀態：已確認");
+        if (rb === "pending") P.toast("已送出預約申請，狀態：待審核");
+      })();
+    </script>
+  </body>
+</html>

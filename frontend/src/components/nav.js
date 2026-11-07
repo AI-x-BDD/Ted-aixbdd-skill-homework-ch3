@@ -1,6 +1,7 @@
 import { post } from "../api/client.js";
 import { h } from "../lib/h.js";
 import { startUnreadPolling } from "../lib/poller.js";
+import { REBOOK_TEXT } from "../../../shared/src/copy.js";
 import { formatTaipei } from "../../../shared/src/taipei.js";
 import { currentUser } from "../router.js";
 
@@ -139,7 +140,7 @@ export function renderNav(activeHref = "") {
       h("div", {
         class: "alert warn",
         testid: "suspension-banner",
-        text: `預約權限暫停至 ${until}`,
+        text: REBOOK_TEXT.suspendedBanner(until),
       }),
     );
   }

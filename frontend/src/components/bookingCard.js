@@ -1,6 +1,10 @@
-import { BOOKING_STATUS_LABELS } from "../../../shared/src/copy.js";
+import {
+  BOOKING_STATUS_LABELS,
+  REBOOK_TEXT,
+} from "../../../shared/src/copy.js";
 import { post } from "../api/client.js";
 import { h } from "../lib/h.js";
+import { rebookState } from "../lib/rebook.js";
 import { formatDate, formatRange } from "../lib/time.js";
 import { openDialog } from "./dialog.js";
 import { showToast } from "./toast.js";
@@ -11,7 +15,7 @@ const EDIT_WHY = {
   status: "目前狀態無法修改。",
 };
 
-export function bookingCard(booking, { onChanged } = {}) {
+export function bookingCard(booking, { onChanged, suspendedUntil } = {}) {
   const statusLabel = BOOKING_STATUS_LABELS[booking.status] ?? booking.status;
   const dateLabel = formatDate(booking.date);
   const range = `${booking.startTime}–${booking.endTime}`;
@@ -73,6 +77,32 @@ export function bookingCard(booking, { onChanged } = {}) {
     );
   }
   const slot = h("div", { class: "row booking-card-actions" });
+  const rebook = rebookState(booking, suspendedUntil);
+  const reasonId = `rebook-reason-${booking.id}`;
+  slot.append(
+    h("button", {
+      class: "btn sm",
+      type: "button",
+      testid: "booking-rebook-button",
+      "aria-label": `${REBOOK_TEXT.buttonLabel}：${booking.venueName}，${booking.subject}`,
+      "aria-describedby": rebook.enabled ? null : reasonId,
+      disabled: !rebook.enabled,
+      text: REBOOK_TEXT.buttonLabel,
+      onClick: () => {
+        window.location.hash = `#/bookings/new?from=${booking.id}`;
+      },
+    }),
+  );
+  if (!rebook.enabled) {
+    slot.append(
+      h("span", {
+        class: "rebook-reason",
+        testid: "booking-rebook-reason",
+        id: reasonId,
+        text: rebook.reason,
+      }),
+    );
+  }
   if (booking.canCheckIn || booking.checkInWindow) {
     const windowText = booking.checkInWindow
       ? formatRange(booking.checkInWindow.startAt, booking.checkInWindow.endAt)

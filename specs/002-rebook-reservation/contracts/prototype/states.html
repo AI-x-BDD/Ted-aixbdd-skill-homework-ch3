@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>狀態入口</title>
+    <link rel="stylesheet" href="proto.css" />
+    <style>
+      main.entry {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 40px 16px 72px;
+      }
+      main.entry ul {
+        list-style: none;
+        margin: 0 0 8px;
+        padding: 6px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+      }
+      main.entry li + li {
+        border-top: 1px solid var(--line);
+      }
+      main.entry li a {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 44px;
+        padding: 8px 12px;
+        color: var(--text);
+        text-decoration: none;
+        font-weight: 600;
+        flex-wrap: wrap;
+      }
+      main.entry li a:hover {
+        background: var(--bg);
+        border-radius: 10px;
+      }
+      main.entry li a::before {
+        content: "";
+        flex: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--ok);
+      }
+      main.entry li a[href*="state=loading"]::before {
+        background: var(--accent);
+      }
+      main.entry li a[href*="state=empty"]::before {
+        background: var(--warn);
+      }
+      main.entry li a[href*="state=error"]::before,
+      main.entry li a[href*="role=employee"][data-denied]::before {
+        background: var(--danger);
+      }
+      code {
+        margin-left: auto;
+        padding: 2px 8px;
+        border-radius: 8px;
+        background: var(--surface-2);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 500;
+        word-break: break-all;
+      }
+      .note {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.7;
+        margin: 0 0 6px;
+        padding-left: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="entry">
+      <h1>狀態入口</h1>
+      <p class="lead">
+        一鍵「再預約一次」的 HTML 原型。每個頁面都能以
+        <code>?state=</code>
+        切換到載入、空狀態與錯誤。原型使用內嵌假資料，假的「現在」為 2026年11月7日（週六）14:00；重新整理即還原假資料，「清除再預約紀錄」可移除示範中建立的新預約。001 既有的其他頁面不在本原型內。
+      </p>
+
+      <h2>UI-01 我的預約的再預約按鈕（bookings.html）</h2>
+      <p class="note">
+        預設資料涵蓋七個狀態代碼（pending、confirmed、checked_in、completed、rejected、cancelled、no_show）；「多功能活動室」的預約場地已停用。
+      </p>
+      <ul>
+        <li><a href="bookings.html">成功：即將到來，每筆都有可按的按鈕<code>bookings.html</code></a></li>
+        <li><a href="bookings.html?tab=past">成功：已結束分頁，含場地已停用的預約<code>?tab=past</code></a></li>
+        <li><a href="bookings.html?suspended=1">成功：權限暫停中，全部按鈕停用<code>?suspended=1</code></a></li>
+        <li><a href="bookings.html?suspended=1&amp;tab=past">成功：權限暫停中，已結束分頁<code>?suspended=1&amp;tab=past</code></a></li>
+        <li><a href="bookings.html?state=loading">載入<code>?state=loading</code></a></li>
+        <li><a href="bookings.html?state=empty">空狀態<code>?state=empty</code></a></li>
+        <li><a href="bookings.html?state=error">錯誤：清單載入失敗<code>?state=error</code></a></li>
+        <li><a href="bookings.html?rebooked=confirmed">再預約成功導回：已確認提示<code>?rebooked=confirmed</code></a></li>
+        <li><a href="bookings.html?rebooked=pending">再預約成功導回：待審核提示<code>?rebooked=pending</code></a></li>
+      </ul>
+
+      <h2>UI-02 再預約預填表單（booking-form.html）</h2>
+      <p class="note">
+        可實際操作：選週一至週六 09:00–18:00 內的未來空閒時段（例如 2026-11-13 10:00–11:00）送出；2026-11-09 10:00–11:00 的 201 會議室已被占用。
+      </p>
+      <ul>
+        <li><a href="booking-form.html?from=b1">成功：不需審核的場地（201 會議室）<code>?from=b1</code></a></li>
+        <li><a href="booking-form.html?from=b2">成功：需審核的場地（大會議室）<code>?from=b2</code></a></li>
+        <li><a href="booking-form.html?from=b1&amp;state=loading">載入<code>?from=b1&amp;state=loading</code></a></li>
+        <li><a href="booking-form.html?from=b1&amp;state=empty">空狀態：未選日期與時間直接送出，顯示必填提示<code>?from=b1&amp;state=empty</code></a></li>
+        <li><a href="booking-form.html?from=zzz">錯誤：來源預約不存在或非本人<code>?from=zzz</code></a></li>
+        <li><a href="booking-form.html?from=b1&amp;state=error&amp;kind=network">錯誤：網路失敗，重新載入<code>&amp;state=error&amp;kind=network</code></a></li>
+        <li><a href="booking-form.html?from=q1&amp;date=2026-11-13&amp;start=10:00&amp;end=11:00&amp;autosubmit=1">錯誤：人數 6 超過現行容納人數 4<code>?from=q1&amp;…&amp;autosubmit=1</code></a></li>
+        <li><a href="booking-form.html?from=b1&amp;date=2026-11-09&amp;start=10:00&amp;end=11:00&amp;autosubmit=1">錯誤：時段被占用，附登記候補<code>?from=b1&amp;date=2026-11-09&amp;…&amp;autosubmit=1</code></a></li>
+        <li><a href="booking-form.html?from=b1&amp;date=2026-11-13&amp;start=10:00&amp;end=11:00&amp;limit=1&amp;autosubmit=1">錯誤：已達持有上限<code>&amp;limit=1&amp;autosubmit=1</code></a></li>
+        <li><a href="booking-form.html?from=b1&amp;date=2026-11-02&amp;start=10:00&amp;end=11:00&amp;autosubmit=1">錯誤：選了已過去的日期<code>&amp;date=2026-11-02&amp;…</code></a></li>
+        <li><a href="booking-form.html?from=b1&amp;date=2026-11-13&amp;start=10:00&amp;end=11:00&amp;suspended=1&amp;autosubmit=1">錯誤：預約權限暫停中被拒絕<code>&amp;suspended=1&amp;autosubmit=1</code></a></li>
+        <li><a href="booking-form.html?from=b9">錯誤：來源場地已停用，表單停用<code>?from=b9</code></a></li>
+      </ul>
+
+      <button id="reset">清除再預約紀錄，還原假資料</button>
+    </main>
+    <script>
+      document.getElementById("reset").onclick = function () {
+        try {
+          sessionStorage.removeItem("rebook-proto:created");
+        } catch (e) {}
+        document.getElementById("reset").textContent = "已還原";
+      };
+    </script>
+  </body>
+</html>

@@ -2,6 +2,7 @@ import { get } from "../api/client.js";
 import { bookingCard } from "../components/bookingCard.js";
 import { mountPage } from "../components/nav.js";
 import { h } from "../lib/h.js";
+import { currentUser } from "../router.js";
 
 export async function render(container) {
   const root = h("div", { testid: "my-bookings" });
@@ -99,7 +100,12 @@ export async function render(container) {
     }
     const list = h("ul", { class: "list", testid: "my-bookings-list" });
     for (const booking of items) {
-      list.append(bookingCard(booking, { onChanged: () => load(true) }));
+      list.append(
+        bookingCard(booking, {
+          onChanged: () => load(true),
+          suspendedUntil: currentUser?.suspendedUntil,
+        }),
+      );
     }
     out.replaceChildren(list);
     if (items.length < total) {

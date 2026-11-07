@@ -1010,3 +1010,30 @@ h1 + .lead {
 [data-testid="venue-list-region"] {
   margin-top: 16px;
 }
+
+/* 一鍵再預約一次（002-rebook-reservation） */
+.booking-card-actions .rebook-reason {
+  font-size: 14px;
+  color: var(--text);
+}
+@media (max-width: 767px) {
+  .booking-card-actions .rebook-reason {
+    flex-basis: 100%;
+  }
+}
+.rebook-mode input,
+.rebook-mode select,
+.rebook-mode button {
+  max-width: 100%;
+  min-height: 44px;
+}
+.rebook-mode .rebook-notice,
+.rebook-mode .rebook-source-error {
+  overflow-wrap: anywhere;
+}
+.rebook-mode .rebook-venue-row {
+  flex-wrap: wrap;
+}
+.rebook-mode .rebook-venue-row .rebook-general-link {
+  align-self: center;
+}

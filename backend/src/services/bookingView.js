@@ -18,6 +18,7 @@ export function toMyBooking(row, rules, current) {
   const window = checkInWindow(row, rules);
   return {
     ...toBooking(row),
+    venueActive: Boolean(row.venue_is_active),
     series: row.series_id
       ? {
           seriesId: Number(row.series_id),

@@ -31,13 +31,12 @@ export function register(router) {
   router.get(
     "/api/bookings/:bookingId",
     requireAuth(async (req, res, { user }) => {
+      // 擁有者檢查在 bookingService.getBooking 內以原始資料完成（isOwner）；
+      // 這裡不再用回傳的 DTO 重複判斷，DTO 不含 userId，會誤判為 403。
       const booking = await bookingService.getBooking(
         user,
         Number(req.params.bookingId),
       );
-      if (!can(user, "booking:view", booking)) {
-        throw new HttpError(403, "你沒有權限使用這個功能。請洽管理員。");
-      }
       sendJson(res, 200, booking);
     }),
   );

@@ -37,7 +37,7 @@ function mapRow(row) {
 
 export async function findById(conn, id) {
   const [rows] = await conn.query(
-    `SELECT b.*, v.name AS venue_name, v.capacity AS venue_capacity, v.requires_approval AS venue_requires_approval
+    `SELECT b.*, v.name AS venue_name, v.capacity AS venue_capacity, v.requires_approval AS venue_requires_approval, v.is_active AS venue_is_active
      FROM bookings b
      JOIN venues v ON v.id = b.venue_id
      WHERE b.id = :id`,
@@ -86,7 +86,7 @@ export async function listMine(
     { userId, now: current },
   );
   const [rows] = await conn.query(
-    `SELECT b.*, v.name AS venue_name
+    `SELECT b.*, v.name AS venue_name, v.is_active AS venue_is_active
      FROM bookings b
      JOIN venues v ON v.id = b.venue_id
      WHERE ${where}

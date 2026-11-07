@@ -1,3 +1,5 @@
+import { REBOOK_TEXT } from "../../../shared/src/copy.js";
+import { formatTaipei } from "../../../shared/src/taipei.js";
 import { get, post, put } from "../api/client.js";
 import { mountPage } from "../components/nav.js";
 import { showToast } from "../components/toast.js";
@@ -5,22 +7,142 @@ import { openWaitlistDialog } from "../components/waitlistDialog.js";
 import { h } from "../lib/h.js";
 import { endTimeOptions, formatDate, startTimeOptions } from "../lib/time.js";
 
+function formatMinutes(minutes) {
+  return minutes % 60 === 0 ? `${minutes / 60} 小時` : `${minutes} 分鐘`;
+}
+
+function toMinutes(time) {
+  const [hour, minute] = time.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+// 只保留來源場地：啟用中則用列表資料（含容納人數），已停用則以來源預約的名稱顯示。
+function rebookVenueChoices(source, venues) {
+  const active = venues.find(
+    (item) => String(item.id) === String(source.venueId),
+  );
+  if (active) {
+    return [active];
+  }
+  return [
+    {
+      id: source.venueId,
+      name: source.venueName,
+      location: "",
+      capacity: null,
+      requiresApproval: false,
+    },
+  ];
+}
+
+function rebookRuleMessage(item, ctx, capacity) {
+  const entry = REBOOK_TEXT.rules[item.rule];
+  if (entry === undefined) {
+    return item.message;
+  }
+  if (typeof entry !== "function") {
+    return entry;
+  }
+  switch (item.rule) {
+    case "advance":
+      return entry(formatDate(ctx.maxBookableDate));
+    case "capacity":
+      return entry(capacity ?? "");
+    case "duration":
+      return entry(formatMinutes(ctx.rules.maxDurationMinutes));
+    case "quota":
+      return entry(ctx.rules.maxActiveBookings);
+    case "suspended":
+      return entry(
+        formatTaipei(new Date(ctx.suspendedUntil), {
+          year: "numeric",
+          month: "long",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      );
+    default:
+      return item.message;
+  }
+}
+
+function rebookSourceError(error, container, params) {
+  if (error.status === 403 || error.status === 404) {
+    return h(
+      "div",
+      {
+        class: "state-box error rebook-source-error",
+        role: "alert",
+        testid: "booking-rebook-source-error",
+      },
+      h("p", { text: REBOOK_TEXT.sourceNotFound }),
+      h("a", {
+        class: "btn",
+        href: "#/bookings/new",
+        testid: "booking-rebook-general-link",
+        text: REBOOK_TEXT.generalBookingLink,
+      }),
+    );
+  }
+  return h(
+    "div",
+    { class: "state-box error", role: "alert" },
+    h("p", { text: REBOOK_TEXT.sourceLoadError }),
+    h("button", {
+      class: "btn",
+      type: "button",
+      testid: "booking-form-reload",
+      text: REBOOK_TEXT.reload,
+      onClick: () => render(container, params),
+    }),
+  );
+}
+
 function setError(el, message) {
   el.setAttribute("aria-invalid", message ? "true" : "false");
   const box = el.closest(".field")?.querySelector(".err");
   if (box) {
+    box.id ||= `err-${el.getAttribute("data-testid")}`;
     box.textContent = message ?? "";
+    if (message) {
+      el.setAttribute("aria-describedby", box.id);
+    } else {
+      el.removeAttribute("aria-describedby");
+    }
   }
 }
 
 export async function render(container, params = {}) {
   const editId = params.bookingId;
+  const fromId = params.from;
+  const rebookMode = Boolean(fromId) && !editId;
   const root = h("div", { testid: "booking-form" });
   mountPage(container, "#/bookings", root);
-  root.append(h("h1", { text: editId ? "修改預約" : "預約場地" }));
+  root.append(
+    h("h1", {
+      text: editId
+        ? "修改預約"
+        : rebookMode
+          ? REBOOK_TEXT.pageTitle
+          : "預約場地",
+    }),
+  );
+  const loadingEl = rebookMode
+    ? h("div", {
+        class: "skel skel-item",
+        testid: "booking-form-loading",
+        "aria-busy": "true",
+      })
+    : null;
+  if (loadingEl) {
+    root.append(loadingEl);
+  }
   let venues = [];
   let ctx = null;
   let existing = null;
+  let source = null;
+  let sourceError = null;
   try {
     const requests = [
       get("/api/context"),
@@ -34,6 +156,7 @@ export async function render(container, params = {}) {
     venues = loaded[1];
     existing = loaded[2] ?? null;
   } catch {
+    loadingEl?.remove();
     root.append(
       h(
         "div",
@@ -49,16 +172,20 @@ export async function render(container, params = {}) {
     );
     return;
   }
-  if (ctx.suspendedUntil && !editId) {
-    root.append(
-      h("div", {
-        class: "alert warn",
-        testid: "suspension-banner",
-        text: `您的預約權限已暫停至 ${ctx.suspendedUntil}。暫停期間無法新增預約、登記候補與確認遞補。`,
-      }),
-    );
+  // 暫停提示由導覽列統一顯示（suspension-banner），表單頁不另外渲染。
+  if (rebookMode) {
+    try {
+      source = await get(`/api/bookings/${fromId}`);
+    } catch (error) {
+      sourceError = error;
+    }
+    loadingEl?.remove();
+    if (sourceError) {
+      root.append(rebookSourceError(sourceError, container, params));
+      return;
+    }
   }
-  if (!venues.length) {
+  if (!rebookMode && !venues.length) {
     root.append(
       h(
         "div",
@@ -82,13 +209,18 @@ export async function render(container, params = {}) {
     hidden: true,
     tabindex: "-1",
   });
-  const venue = h("select", { testid: "booking-venue" });
-  const preVenue = existing?.venueId ?? params.venueId ?? params.venue;
-  for (const item of venues) {
+  const seed = rebookMode ? source : existing;
+  const choices = rebookMode ? rebookVenueChoices(source, venues) : venues;
+  const venue = h("select", {
+    testid: "booking-venue",
+    "aria-readonly": rebookMode ? "true" : null,
+  });
+  const preVenue = seed?.venueId ?? params.venueId ?? params.venue;
+  for (const item of choices) {
     venue.append(
       h("option", {
         value: String(item.id),
-        text: `${item.name}（${item.location}）`,
+        text: item.location ? `${item.name}（${item.location}）` : item.name,
         selected: String(item.id) === String(preVenue),
       }),
     );
@@ -96,29 +228,42 @@ export async function render(container, params = {}) {
   const date = h("input", {
     testid: "booking-date",
     type: "date",
-    value: existing?.date ?? params.date ?? ctx.today,
+    value: rebookMode ? "" : (existing?.date ?? params.date ?? ctx.today),
   });
+  const placeholder = () =>
+    h("option", { value: "", text: REBOOK_TEXT.timePlaceholder });
   const start = h("select", { testid: "booking-start" });
+  if (rebookMode) {
+    start.append(placeholder());
+  }
   for (const option of startTimeOptions()) {
     start.append(
       h("option", {
         value: option,
         text: option,
-        selected:
-          option ===
-          (existing?.startTime ?? params.startTime ?? params.start ?? "09:00"),
+        selected: rebookMode
+          ? false
+          : option ===
+            (existing?.startTime ??
+              params.startTime ??
+              params.start ??
+              "09:00"),
       }),
     );
   }
   const end = h("select", { testid: "booking-end" });
+  if (rebookMode) {
+    end.append(placeholder());
+  }
   for (const option of endTimeOptions()) {
     end.append(
       h("option", {
         value: option,
         text: option,
-        selected:
-          option ===
-          (existing?.endTime ?? params.endTime ?? params.end ?? "09:30"),
+        selected: rebookMode
+          ? false
+          : option ===
+            (existing?.endTime ?? params.endTime ?? params.end ?? "09:30"),
       }),
     );
   }
@@ -126,14 +271,14 @@ export async function render(container, params = {}) {
     testid: "booking-subject",
     type: "text",
     maxlength: "100",
-    value: existing?.subject ?? "",
+    value: seed?.subject ?? "",
   });
   const attendees = h("input", {
     testid: "booking-attendees",
     type: "number",
     min: "1",
     inputmode: "numeric",
-    value: existing ? String(existing.attendees) : "",
+    value: seed ? String(seed.attendees) : "",
   });
   const info = h("p", { class: "hint", testid: "booking-venue-info" });
   const submit = h("button", {
@@ -162,7 +307,7 @@ export async function render(container, params = {}) {
   });
 
   function selectedVenue() {
-    return venues.find((item) => String(item.id) === venue.value);
+    return choices.find((item) => String(item.id) === venue.value);
   }
   function updateInfo() {
     const item = selectedVenue();
@@ -205,7 +350,25 @@ export async function render(container, params = {}) {
       "div",
       { class: "form-col" },
       step(1, "場地與時間"),
-      h("div", { class: "field" }, h("label", { text: "場地" }, venue), info),
+      h(
+        "div",
+        { class: "field" },
+        h("label", { text: "場地" }, venue),
+        info,
+        rebookMode
+          ? h(
+              "div",
+              { class: "row rebook-venue-row" },
+              h("p", { class: "hint", text: REBOOK_TEXT.venueFixedNote }),
+              h("a", {
+                class: "btn sm rebook-general-link",
+                href: "#/bookings/new",
+                testid: "booking-rebook-general-link",
+                text: REBOOK_TEXT.generalBookingLink,
+              }),
+            )
+          : null,
+      ),
       h(
         "div",
         { class: "field" },
@@ -215,7 +378,12 @@ export async function render(container, params = {}) {
       h(
         "div",
         { class: "grid2" },
-        h("div", { class: "field" }, h("label", { text: "開始時間" }, start)),
+        h(
+          "div",
+          { class: "field" },
+          h("label", { text: "開始時間" }, start),
+          h("div", { class: "err", testid: "booking-start-error" }),
+        ),
         h(
           "div",
           { class: "field" },
@@ -241,14 +409,14 @@ export async function render(container, params = {}) {
         h("label", { text: "人數" }, attendees),
         h("div", { class: "err", testid: "booking-attendees-error" }),
       ),
-      editId
+      editId || rebookMode
         ? null
         : h(
             "div",
             { class: "field" },
             h("label", { class: "checks check-line" }, recToggle, "重複預約"),
           ),
-      editId ? null : recBox,
+      editId || rebookMode ? null : recBox,
     ),
     h(
       "div",
@@ -256,13 +424,36 @@ export async function render(container, params = {}) {
       submit,
       h("a", {
         class: "btn",
-        href: editId ? "#/bookings" : "#/venues",
+        href: editId || rebookMode ? "#/bookings" : "#/venues",
         testid: "booking-back",
         text: "返回",
       }),
     ),
   );
+  if (rebookMode && source.venueActive !== false) {
+    root.append(
+      h("div", {
+        class: "alert ok rebook-notice",
+        role: "status",
+        testid: "booking-rebook-notice",
+        text: REBOOK_TEXT.prefillNotice(source.venueName),
+      }),
+    );
+  }
   root.append(form, result);
+  if (rebookMode && source.venueActive === false) {
+    root.append(
+      h("div", {
+        class: "alert danger rebook-source-error",
+        role: "alert",
+        testid: "booking-rebook-source-error",
+        text: REBOOK_TEXT.rules.venue_inactive,
+      }),
+    );
+    for (const el of form.querySelectorAll("input, select, button")) {
+      el.disabled = true;
+    }
+  }
 
   function payload() {
     return {
@@ -278,11 +469,22 @@ export async function render(container, params = {}) {
   function showErrors(error) {
     const violations = error.violations ?? [];
     errBox.hidden = false;
-    errBox.replaceChildren(h("p", { text: error.message ?? "無法送出預約。" }));
+    const title =
+      rebookMode && violations.length
+        ? REBOOK_TEXT.errorListTitle
+        : (error.message ?? "無法送出預約。");
+    errBox.replaceChildren(h("p", { text: title }));
     if (violations.length) {
       const list = h("ul");
+      const capacity = selectedVenue()?.capacity;
       for (const item of violations)
-        list.append(h("li", { text: item.message }));
+        list.append(
+          h("li", {
+            text: rebookMode
+              ? rebookRuleMessage(item, ctx, capacity)
+              : item.message,
+          }),
+        );
       errBox.append(list);
     }
     if (
@@ -451,9 +653,113 @@ export async function render(container, params = {}) {
     }
   }
 
+  // 再預約模式的欄位失焦檢查（UI-02：修改主題與人數、選擇新日期與起訖時間）
+  function attendeesMessage() {
+    const count = Number.parseInt(attendees.value, 10);
+    if (!attendees.value || !(count >= 1)) {
+      return REBOOK_TEXT.requiredAttendees;
+    }
+    const capacity = selectedVenue()?.capacity;
+    if (capacity && count > capacity) {
+      return REBOOK_TEXT.attendeesOverCapacity(capacity);
+    }
+    return "";
+  }
+
+  function endMessage() {
+    if (!start.value || !end.value) {
+      return "";
+    }
+    if (end.value <= start.value) {
+      return REBOOK_TEXT.endBeforeStart;
+    }
+    const minutes = toMinutes(end.value) - toMinutes(start.value);
+    const max = ctx.rules.maxDurationMinutes;
+    if (max && minutes > max) {
+      return REBOOK_TEXT.rules.duration(formatMinutes(max));
+    }
+    return "";
+  }
+
+  function checkEnd() {
+    const message = endMessage();
+    setError(end, message);
+    return message;
+  }
+
+  if (rebookMode) {
+    subject.addEventListener("blur", () =>
+      setError(
+        subject,
+        subject.value.trim() ? "" : REBOOK_TEXT.requiredSubject,
+      ),
+    );
+    attendees.addEventListener("blur", () =>
+      setError(attendees, attendeesMessage()),
+    );
+    start.addEventListener("change", checkEnd);
+    end.addEventListener("change", checkEnd);
+    end.addEventListener("blur", checkEnd);
+  }
+
+  function setBusy(on) {
+    form.setAttribute("aria-busy", on ? "true" : "false");
+    for (const el of [venue, date, start, end, subject, attendees]) {
+      el.disabled = on;
+    }
+    submit.disabled = on;
+    submit.textContent = on ? REBOOK_TEXT.submitting : REBOOK_TEXT.submitLabel;
+  }
+
+  async function submitRebook() {
+    const checks = [
+      [date, !date.value, REBOOK_TEXT.requiredDate],
+      [start, !start.value, REBOOK_TEXT.requiredStart],
+      [end, !end.value, REBOOK_TEXT.requiredEnd],
+      [subject, !subject.value.trim(), REBOOK_TEXT.requiredSubject],
+    ];
+    let firstInvalid = null;
+    for (const [el, missing, message] of checks) {
+      setError(el, missing ? message : "");
+      if (missing && !firstInvalid) {
+        firstInvalid = el;
+      }
+    }
+    const attendeeMessage = attendeesMessage();
+    setError(attendees, attendeeMessage);
+    if (attendeeMessage && !firstInvalid) {
+      firstInvalid = attendees;
+    }
+    const endError = checkEnd();
+    if (endError && !firstInvalid) {
+      firstInvalid = end;
+    }
+    if (firstInvalid) {
+      firstInvalid.focus();
+      return;
+    }
+    setBusy(true);
+    try {
+      const created = await post("/api/bookings", payload());
+      showToast(
+        created.status === "pending"
+          ? REBOOK_TEXT.successPending
+          : REBOOK_TEXT.successConfirmed,
+      );
+      window.location.hash = "#/bookings";
+    } catch (error) {
+      showErrors(error);
+      setBusy(false);
+    }
+  }
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     errBox.hidden = true;
+    if (rebookMode) {
+      await submitRebook();
+      return;
+    }
     if (!editId && recToggle.checked) {
       await checkSeries();
       return;

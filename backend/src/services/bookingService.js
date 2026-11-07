@@ -20,6 +20,7 @@ import { canCheckIn, checkInWindow } from "../domain/checkIn.js";
 import { isOwner } from "../domain/policy.js";
 import * as slotRepository from "../repositories/slotRepository.js";
 import { transition } from "./bookingTransition.js";
+import { toMyBooking } from "./bookingView.js";
 
 function requireCreate(user) {
   if (!can(user, "booking:create")) {
@@ -229,7 +230,24 @@ export async function getBooking(user, bookingId) {
     if (!isOwner(user, booking)) {
       throw new HttpError(403, "你沒有權限使用這個功能。請洽管理員。");
     }
-    return toBooking(booking);
+    const current = now();
+    const snapshot = await ruleRepository.loadAll(conn);
+    const events = await eventRepository.listByBooking(conn, booking.id);
+    const last = [...events]
+      .reverse()
+      .find(
+        (event) =>
+          event.to_status === "rejected" || event.to_status === "cancelled",
+      );
+    return toMyBooking(
+      {
+        ...booking,
+        status_reason: last?.reason ?? null,
+        status_actor: last?.actor_type ?? null,
+      },
+      snapshot,
+      current,
+    );
   });
 }
 
