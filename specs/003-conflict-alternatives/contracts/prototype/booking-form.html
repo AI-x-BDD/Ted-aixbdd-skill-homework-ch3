@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>預約場地</title>
+    <link rel="stylesheet" href="proto.css" />
+    <style>
+      /* 替代建議區塊（UI-01、UI-02）：窄螢幕換行，不水平捲動 */
+      .alt-suggestions {
+        display: grid;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .alt-block {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 14px 16px;
+        min-width: 0;
+      }
+      .alt-block h3 {
+        margin: 0 0 4px;
+        font-size: 16px;
+      }
+      .alt-block .hint {
+        margin: 0 0 10px;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+      .alt-options {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .alt-option {
+        min-height: 44px;
+        height: auto;
+        max-width: 100%;
+        padding: 8px 14px;
+        white-space: normal;
+        text-align: left;
+        flex-wrap: wrap;
+        gap: 4px 10px;
+      }
+      .alt-option .alt-time {
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+      }
+      .alt-option .alt-dir {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .alt-option .alt-cap {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .alt-empty {
+        margin: 0;
+        font-weight: 600;
+      }
+      .alt-notice:empty {
+        display: none;
+      }
+      .rebook-venue-row {
+        margin: 0 0 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script src="waitlist-dialog.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("bookings.html");
+
+        /* ---------- 本功能的假資料：場地、占用與維護 ---------- */
+        P.VENUES.push(
+          { id: "v6", name: "202 會議室", loc: "總公司 2F", cap: 10, eq: [], approval: false, reviewers: [], active: true },
+          { id: "v7", name: "203 會議室", loc: "總公司 2F", cap: 10, eq: [], approval: false, reviewers: [], active: true },
+          { id: "v8", name: "301 研討室", loc: "總公司 3F", cap: 12, eq: [], approval: true, reviewers: ["林審核"], active: true },
+          { id: "v9", name: "302 研討室", loc: "總公司 3F", cap: 12, eq: [], approval: true, reviewers: ["林審核"], active: true, open: [780, 1080] },
+          { id: "v10", name: "303 研討室", loc: "總公司 3F", cap: 10, eq: [], approval: false, reviewers: [], active: true }
+        );
+        var ALL_IDS = ["v1", "v2", "v3", "v4", "v6", "v7", "v8", "v9", "v10"];
+        var HORIZON = P.addDays(P.NOW.date, 30); // 2026-12-07
+        var NOW_MIN = P.min(P.NOW.time);
+        var OCC = {}; // "場地|日期" -> [[起分鐘, 迄分鐘, 種類]]，種類 booked／maint（含候補保留）
+        function occ(v, d, s, e, kind) {
+          var k = v + "|" + d;
+          (OCC[k] = OCC[k] || []).push([s, e, kind || "booked"]);
+        }
+        occ("v1", "2026-11-09", 600, 660); // 週一 10:00–11:00 他人預約
+        occ("v2", "2026-11-09", 600, 660);
+        occ("v7", "2026-11-09", 600, 660, "maint");
+        occ("v1", "2026-11-10", 540, 660); // 09:00–11:00 他人預約：只剩往後的空檔
+        occ("v1", "2026-11-11", 540, 720); // 整天占用或維護：當天已無空檔
+        occ("v1", "2026-11-11", 720, 780, "maint");
+        occ("v1", "2026-11-11", 780, 1080);
+        occ("v1", "2026-11-12", 600, 660); // 10:00–11:00 預約、11:00–12:00 維護：往後跳過維護
+        occ("v1", "2026-11-12", 660, 720, "maint");
+        occ("v1", "2026-11-13", 1020, 1080); // 17:00–18:00 預約：只剩往前的空檔
+        occ("v1", "2026-11-17", 600, 840); // 10:00–14:00 預約；使用者自己的原預約在 14:00–15:00（不計入占用）
+        occ("v1", "2026-11-18", 600, 660); // 其他場地整天都滿：沒有其他可用場地
+        ALL_IDS.forEach(function (id) {
+          if (id !== "v1") occ(id, "2026-11-18", 540, 1080);
+          occ(id, "2026-11-19", 540, 1080); // 所有場地整天都滿：兩側皆無
+        });
+        var EDIT = { venue: "v1", date: "2026-11-17", s: "14:00", e: "15:00", subject: "週會", n: 6 };
+
+        function busy1(vid, d, m) {
+          var a = OCC[vid + "|" + d] || [];
+          for (var i = 0; i < a.length; i++) if (m >= a[i][0] && m < a[i][1]) return true;
+          return false;
+        }
+        function freeRange(vid, d, s, e) {
+          for (var m = s; m < e; m += 30) if (busy1(vid, d, m)) return false;
+          return true;
+        }
+        function openFor(v, d) {
+          return P.dow(d) === 0 ? null : v.open || [540, 1080];
+        }
+        /* 登記候補對話框用：與本原型的占用資料一致 */
+        P.slotState = function (vid, d, m) {
+          var v = P.venue(vid),
+            o = v && openFor(v, d);
+          if (!o || m < o[0] || m >= o[1]) return "closed";
+          return busy1(vid, d, m) ? "booked" : "free";
+        };
+        /* 除占用以外的規則是否都通過（建議必須符合一般預約的規則） */
+        function rulesOk(v, d, s, e, att) {
+          if (!v.active) return false;
+          if (d < P.NOW.date || (d === P.NOW.date && s < NOW_MIN)) return false;
+          if (d > HORIZON) return false;
+          var o = openFor(v, d);
+          if (!o || s < o[0] || e > o[1]) return false;
+          if (e - s > 240) return false;
+          if (att > v.cap) return false;
+          return true;
+        }
+        /* 內層回應中的時間點為帶 Z 的 UTC；前端換算為台北時間顯示 */
+        function iso(d, min) {
+          var p = d.split("-");
+          return new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]) + min * 60000 - 8 * 3600000).toISOString();
+        }
+        function taipei(isoStr, refDate) {
+          var t = new Date(new Date(isoStr).getTime() + 8 * 3600000);
+          var d = t.getUTCFullYear() + "-" + P.pad(t.getUTCMonth() + 1) + "-" + P.pad(t.getUTCDate());
+          var tm = P.pad(t.getUTCHours()) + ":" + P.pad(t.getUTCMinutes());
+          if (refDate && d > refDate && tm === "00:00") return { date: refDate, time: "24:00" };
+          return { date: d, time: tm };
+        }
+        function findSlots(v, d, s, e, att, excl) {
+          var len = e - s,
+            before = null,
+            after = null;
+          for (var st = 0; st + len <= 1440; st += 30) {
+            if (st === s) continue;
+            if (excl && excl.date === d && excl.s === st && excl.e === st + len) continue; // 不列出原預約自己的時段
+            if (!rulesOk(v, d, st, st + len, att) || !freeRange(v.id, d, st, st + len)) continue;
+            if (st < s) before = st;
+            else if (after === null) after = st;
+          }
+          function mk(st) {
+            return st === null ? null : { startAt: iso(d, st), endAt: iso(d, st + len) };
+          }
+          return { before: mk(before), after: mk(after), noSlotsToday: before === null && after === null };
+        }
+        function findVenues(cur, d, s, e, att) {
+          return P.VENUES.filter(function (v) {
+            return v.id !== cur.id && rulesOk(v, d, s, e, att) && freeRange(v.id, d, s, e);
+          })
+            .sort(function (a, b) {
+              if (a.approval !== b.approval) return a.approval ? 1 : -1;
+              return a.name.localeCompare(b.name, "zh-Hant");
+            })
+            .slice(0, 5)
+            .map(function (v) {
+              return { id: v.id, name: v.name, cap: v.cap, approval: v.approval };
+            });
+        }
+
+        /* ---------- 情境與參數 ---------- */
+        var SCENES = {
+          basic: { venue: "v1", date: "2026-11-09", start: "10:00", end: "11:00", att: 6, subject: "產品週會" },
+          "one-side": { venue: "v1", date: "2026-11-10", start: "10:00", end: "11:00", att: 6, subject: "產品週會" },
+          "day-full": { venue: "v1", date: "2026-11-11", start: "10:00", end: "11:00", att: 6, subject: "產品週會" },
+          maint: { venue: "v1", date: "2026-11-12", start: "10:00", end: "11:00", att: 6, subject: "產品週會" },
+          "edge-end": { venue: "v1", date: "2026-11-13", start: "17:00", end: "18:00", att: 6, subject: "產品週會" },
+          "no-venues": { venue: "v1", date: "2026-11-18", start: "10:00", end: "11:00", att: 6, subject: "產品週會" },
+          none: { venue: "v1", date: "2026-11-19", start: "10:00", end: "11:00", att: 6, subject: "產品週會" },
+          capacity: { venue: "v1", date: "2026-11-09", start: "10:00", end: "11:00", att: 9, subject: "產品週會" },
+          edit: { mode: "edit", venue: "v1", date: "2026-11-17", start: "10:00", end: "11:00", att: 6, subject: "週會" },
+          rebook: { mode: "rebook", venue: "v1", date: "2026-11-09", start: "10:00", end: "11:00", att: 6, subject: "產品週會" }
+        };
+        var flags = {
+          limit: q.get("limit") === "1",
+          suspended: q.get("suspended") === "1",
+          nosuggest: q.get("nosuggest") === "1",
+          netfail: q.get("netfail") === "1",
+          race: q.get("race") === "1",
+          autosubmit: q.get("autosubmit") === "1",
+          autoclick: q.get("autoclick"),
+          autosend: q.get("autosend") === "1"
+        };
+        var sceneKey = q.get("scene");
+        if (P.state === "loading") sceneKey = sceneKey || "basic";
+        if (P.state === "empty") {
+          var only = q.get("only");
+          sceneKey = sceneKey || (only === "slots" ? "day-full" : only === "venues" ? "no-venues" : "none");
+          flags.autosubmit = true;
+        }
+        if (P.state === "error") {
+          var kind = q.get("kind") || "combined";
+          flags.autosubmit = true;
+          if (kind === "combined") { sceneKey = sceneKey || "basic"; flags.limit = true; }
+          else if (kind === "capacity") sceneKey = sceneKey || "capacity";
+          else if (kind === "suspended") { sceneKey = sceneKey || "basic"; flags.suspended = true; }
+          else if (kind === "nosuggest") { sceneKey = sceneKey || "basic"; flags.nosuggest = true; }
+          else if (kind === "network") { sceneKey = sceneKey || "basic"; flags.netfail = true; }
+          else if (kind === "race") { sceneKey = sceneKey || "basic"; flags.race = true; flags.autoclick = "slot-after"; flags.autosend = true; }
+        }
+        var SC = SCENES[sceneKey] || {};
+        var mode = q.get("mode") || SC.mode || "create"; // create／edit／rebook
+        var rebook = mode === "rebook",
+          editing = mode === "edit";
+        if (flags.autoclick) flags.autosubmit = true;
+
+        /* ---------- 文案（與 ui-contract.md 一致） ---------- */
+        var T = {
+          title: editing ? "修改預約" : rebook ? "再預約一次" : "預約場地",
+          submit: editing ? "儲存修改" : "送出預約",
+          sending: "送出中…",
+          listTitle: "無法送出，以下規則未通過：",
+          occupied: "該時段已被占用。請改選其他時段，或登記候補。",
+          limit: "已達持有上限（最多 5 筆）。請先取消或等待既有預約結束後再預約。",
+          suspended: "您的預約權限已暫停，將於 2026年11月14日（週六）10:30 解除。解除前仍可報到、取消與修改既有預約。",
+          past: "不能預約已過去的時間。請選擇之後的時段。",
+          far: "最遠可預約到 2026年12月7日（週一）。請選擇更早的日期。",
+          open: "預約須落在開放時段內。請參考行事曆選擇開放的時間。",
+          duration: "單次最長 4 小時。請縮短預約時間。",
+          cap: function (n) {
+            return "人數超過容納人數（可容納 " + n + " 人）。" + (rebook ? "請減少人數後再送出。" : "請減少人數或改選其他場地。");
+          },
+          net: "無法送出預約。請檢查網路連線後再試一次。",
+          slotsTitle: "同場地最近的空檔",
+          slotsHint: "同一天、時間長度相同的空檔。點選後只會填入日期與時間，不會自動送出。",
+          slotsEmpty: "當天已無空檔",
+          venuesTitle: "同時段其他可用場地",
+          venuesHint: "同日期與時間仍可預約、容納人數也足夠的場地。點選後只會更換場地，不會自動送出。",
+          venuesEmpty: "此時段沒有其他可用場地",
+          venuesApprovalNote: "標示「需審核」的場地，送出後為待審核並先占用時段。",
+          approval: "需審核",
+          earlier: "較早",
+          later: "較晚",
+          waitlist: "登記候補"
+        };
+        function sub(d, s, e) {
+          return P.fmtDate(d) + " " + s + "–" + e;
+        }
+
+        /* ---------- 版面 ---------- */
+        document.title = T.title;
+        var root = h("div", { tid: "booking-form" });
+        main.appendChild(root);
+        root.appendChild(P.header(T.title));
+        if (flags.suspended) root.appendChild(P.suspension());
+        if (rebook)
+          root.appendChild(
+            h("div", {
+              class: "alert ok",
+              tid: "booking-rebook-notice",
+              role: "status",
+              text: "已帶入「" + P.venue("v1").name + "」、主題與人數。請選擇新的日期與起訖時間，主題與人數可以修改。"
+            })
+          );
+        var notice = h("div", { class: "alert ok alt-notice", tid: "alt-applied-notice", role: "status" });
+        root.appendChild(notice);
+        var errBox = h("div", { tid: "booking-form-error", hidden: true, tabindex: "-1" });
+        root.appendChild(errBox);
+        var form = h("form", { class: "card booking-form", novalidate: true });
+        root.appendChild(form);
+        var col1 = h("div", { class: "form-col" }, h("h2", { class: "step" }, h("span", { text: "1" }), "場地與時間"));
+        var col2 = h("div", { class: "form-col" }, h("h2", { class: "step" }, h("span", { text: "2" }), "預約資料"));
+        form.appendChild(col1);
+        form.appendChild(col2);
+
+        var pre = { venue: "v1", date: "", start: "09:00", end: "09:30", subject: "", att: "" };
+        if (editing) pre = { venue: EDIT.venue, date: EDIT.date, start: EDIT.s, end: EDIT.e, subject: EDIT.subject, att: EDIT.n };
+        if (rebook) pre = { venue: "v1", date: "", start: "", end: "", subject: "產品週會", att: 6 };
+        ["venue", "date", "start", "end", "subject", "att"].forEach(function (k) {
+          if (SC[k] != null) pre[k] = SC[k];
+          if (q.get(k) != null) pre[k] = q.get(k);
+        });
+
+        var TIMES_S = (rebook ? [["", "請選擇"]] : []).concat(P.times(0, 1410));
+        var TIMES_E = (rebook ? [["", "請選擇"]] : []).concat(P.times(30, 1440));
+        var f = {
+          venue: rebook
+            ? h("input", {
+                tid: "booking-venue",
+                type: "text",
+                value: P.venue("v1").name + "（" + P.venue("v1").loc + "）",
+                readonly: true,
+                "aria-readonly": "true",
+                "aria-describedby": "venue-fixed"
+              })
+            : P.select(
+                "booking-venue",
+                "",
+                P.activeVenues().map(function (v) {
+                  return [v.id, v.name + "（" + v.loc + "）"];
+                }),
+                pre.venue
+              ),
+          date: h("input", { tid: "booking-date", type: "date", value: pre.date }),
+          start: P.select("booking-start", "", TIMES_S, pre.start),
+          end: P.select("booking-end", "", TIMES_E, pre.end),
+          subject: h("input", { tid: "booking-subject", type: "text", value: pre.subject, maxlength: "100" }),
+          att: h("input", { tid: "booking-attendees", type: "number", min: "1", inputmode: "numeric", value: pre.att })
+        };
+        function curVenue() {
+          return rebook ? P.venue("v1") : P.venue(f.venue.value);
+        }
+        var info = h("div", { class: "hint", tid: "booking-venue-info", style: "margin:-6px 0 12px" });
+        function updInfo() {
+          var v = curVenue();
+          info.textContent = "可容納 " + v.cap + " 人；" + (v.approval ? "需要審核，送出後為待審核並先占用時段" : "送出後立即成立");
+        }
+        col1.appendChild(P.field("場地", f.venue));
+        if (rebook) {
+          col1.appendChild(h("div", { class: "hint", id: "venue-fixed", style: "margin:-6px 0 4px", text: "再預約的場地固定。要換場地請改為一般預約。" }));
+          col1.appendChild(
+            h("div", { class: "rebook-venue-row" }, h("a", { class: "btn", tid: "booking-rebook-general-link", href: P.link("booking-form.html"), text: "改為一般預約" }))
+          );
+        }
+        col1.appendChild(info);
+        updInfo();
+        col1.appendChild(P.field("日期", f.date, null, "booking-date-error"));
+        var g = h("div", { class: "grid2" });
+        g.appendChild(P.field("開始時間", f.start, null, "booking-start-error"));
+        g.appendChild(P.field("結束時間", f.end, "時間以台北時間（UTC+8）顯示", "booking-end-error"));
+        col1.appendChild(g);
+        col2.appendChild(P.field("主題", f.subject, null, "booking-subject-error"));
+        col2.appendChild(P.field("人數", f.att, null, "booking-attendees-error"));
+
+        var submit = h("button", { class: "btn primary", type: "submit", tid: "booking-submit", text: T.submit });
+        form.appendChild(
+          h("div", { class: "row form-foot" }, submit, h("a", { class: "btn", tid: "booking-back", href: "states.html", text: "返回" }))
+        );
+        var fields = [f.venue, f.date, f.start, f.end, f.subject, f.att];
+
+        function busy(b) {
+          submit.disabled = b;
+          fields.forEach(function (c) {
+            c.disabled = b;
+          });
+          form.setAttribute("aria-busy", b);
+          submit.textContent = b ? T.sending : T.submit;
+        }
+
+        /* ---------- 載入狀態：送出後等待回應（停在等待中供檢視） ---------- */
+        if (P.state === "loading") {
+          busy(true);
+          return;
+        }
+
+        /* ---------- 替代建議（UI-01、UI-02） ---------- */
+        var picked = null,
+          raced = false,
+          clicked = false;
+        function applied(text) {
+          notice.textContent = text;
+          errBox.hidden = true;
+          errBox.innerHTML = "";
+          [f.date, f.start, f.end].forEach(function (c) {
+            P.fieldErr(c, "");
+          });
+          submit.focus();
+        }
+        function applySlot(date, s, e) {
+          f.date.value = date;
+          f.start.value = s;
+          f.end.value = e;
+          picked = { venue: curVenue().id, date: date, s: P.min(s), e: P.min(e) };
+          applied("已改為 " + sub(date, s, e) + "，尚未送出。請確認後按「" + T.submit + "」。");
+        }
+        function applyVenue(v) {
+          f.venue.value = v.id;
+          updInfo();
+          picked = { venue: v.id, date: f.date.value, s: P.min(f.start.value), e: P.min(f.end.value) };
+          applied("已改為「" + v.name + "」，尚未送出。請確認後按「" + T.submit + "」。");
+        }
+        function slotBtn(dir, s) {
+          var a = taipei(s.startAt),
+            b = taipei(s.endAt, a.date);
+          var word = dir === "before" ? T.earlier : T.later;
+          return h(
+            "button",
+            {
+              class: "btn alt-option",
+              type: "button",
+              tid: "alt-slot-" + dir,
+              "data-date": a.date,
+              "data-start": a.time,
+              "data-end": b.time,
+              "aria-label": "改選" + word + "的時段：" + sub(a.date, a.time, b.time),
+              onclick: function () {
+                applySlot(a.date, a.time, b.time);
+              }
+            },
+            h("span", { class: "alt-time", text: a.time + "–" + b.time }),
+            h("span", { class: "alt-dir", text: word })
+          );
+        }
+        function venueBtn(v) {
+          var kids = [
+            h("span", { class: "alt-time", text: v.name }),
+            h("span", { class: "alt-cap", text: "可容納 " + v.cap + " 人" })
+          ];
+          if (v.approval) kids.push(h("span", { class: "tag warn", tid: "alt-venue-approval", text: T.approval }));
+          return h(
+            "button",
+            {
+              class: "btn alt-option",
+              type: "button",
+              tid: "alt-venue-option",
+              "data-id": v.id,
+              "aria-label": "改選場地：" + v.name + "，可容納 " + v.cap + " 人" + (v.approval ? "，" + T.approval : ""),
+              onclick: function () {
+                applyVenue(v);
+              }
+            },
+            kids
+          );
+        }
+        function renderSuggestions(sug) {
+          var wrap = h("div", { class: "alt-suggestions", tid: "alt-suggestions" });
+          var sl = h(
+            "section",
+            { class: "alt-block", tid: "alt-slots", "aria-labelledby": "alt-slots-title" },
+            h("h3", { id: "alt-slots-title", text: T.slotsTitle }),
+            h("p", { class: "hint", text: T.slotsHint })
+          );
+          if (sug.noSlotsToday)
+            sl.appendChild(h("p", { class: "alt-empty", tid: "alt-slots-empty", text: T.slotsEmpty }));
+          else {
+            var ol = h("div", { class: "alt-options" });
+            if (sug.before) ol.appendChild(slotBtn("before", sug.before));
+            if (sug.after) ol.appendChild(slotBtn("after", sug.after));
+            sl.appendChild(ol);
+          }
+          wrap.appendChild(sl);
+          if (!rebook) {
+            var vb = h(
+              "section",
+              { class: "alt-block", tid: "alt-venues", "aria-labelledby": "alt-venues-title" },
+              h("h3", { id: "alt-venues-title", text: T.venuesTitle }),
+              h("p", { class: "hint", text: T.venuesHint })
+            );
+            if (!sug.venues.length)
+              vb.appendChild(h("p", { class: "alt-empty", tid: "alt-venues-empty", text: T.venuesEmpty }));
+            else {
+              var vl = h("div", { class: "alt-options" });
+              sug.venues.forEach(function (v) {
+                vl.appendChild(venueBtn(v));
+              });
+              vb.appendChild(vl);
+              if (
+                sug.venues.some(function (v) {
+                  return v.approval;
+                })
+              )
+                vb.appendChild(h("p", { class: "hint", style: "margin:10px 0 0", text: T.venuesApprovalNote }));
+            }
+            wrap.appendChild(vb);
+          }
+          return wrap;
+        }
+        function showErrors(r) {
+          errBox.hidden = false;
+          errBox.innerHTML = "";
+          if (r.net) {
+            errBox.appendChild(h("div", { class: "alert danger", role: "alert" }, T.net));
+            errBox.focus();
+            return;
+          }
+          var ul = h("ul");
+          r.errs.forEach(function (t) {
+            ul.appendChild(h("li", { text: t }));
+          });
+          var box = h("div", { class: "alert danger", role: "alert" }, T.listTitle, ul);
+          if (r.occupied)
+            box.appendChild(
+              h(
+                "div",
+                null,
+                h("button", {
+                  class: "btn sm",
+                  type: "button",
+                  tid: "booking-waitlist-link",
+                  text: T.waitlist,
+                  onclick: function (e) {
+                    P.waitlistDialog(
+                      { venue: curVenue().id, date: f.date.value, start: f.start.value, end: f.end.value, subject: f.subject.value, att: f.att.value },
+                      e.target
+                    );
+                  }
+                })
+              )
+            );
+          errBox.appendChild(box);
+          if (r.suggestions) errBox.appendChild(renderSuggestions(r.suggestions));
+          errBox.focus();
+        }
+
+        /* ---------- 前端檢查：送出只攔截必填與格式；長度上限、人數上限於失焦時提示，不攔截送出 ---------- */
+        function frontCheck(noFocus) {
+          var ok = true,
+            first = null;
+          function bad(c, msg, hard) {
+            P.fieldErr(c, msg);
+            if (msg && hard) {
+              ok = false;
+              if (!first) first = c;
+            }
+          }
+          bad(f.date, f.date.value ? "" : "請選擇日期。", true);
+          bad(f.start, f.start.value ? "" : "請選擇開始時間。", true);
+          var s = f.start.value ? P.min(f.start.value) : null,
+            e = f.end.value ? P.min(f.end.value) : null;
+          if (!f.end.value) bad(f.end, "請選擇結束時間。", true);
+          else if (s !== null && e <= s) bad(f.end, "結束時間須晚於開始時間。請重新選擇。", true);
+          else if (s !== null && e - s > 240) bad(f.end, T.duration, false);
+          else bad(f.end, "", true);
+          bad(f.subject, f.subject.value.trim() ? "" : "請輸入主題。", true);
+          var n = parseInt(f.att.value, 10);
+          if (!(n >= 1)) bad(f.att, "請輸入人數，須為 1 以上的整數。", true);
+          else if (n > curVenue().cap) bad(f.att, T.cap(curVenue().cap), false);
+          else bad(f.att, "", true);
+          if (first && !noFocus) first.focus();
+          return ok;
+        }
+
+        /* ---------- 假的「內層」：規則並列、占用偵測與建議 ---------- */
+        function server() {
+          if (flags.netfail) return { net: true };
+          var v = curVenue(),
+            d = f.date.value,
+            s = P.min(f.start.value),
+            e = P.min(f.end.value),
+            att = parseInt(f.att.value, 10),
+            errs = [];
+          if (flags.race && !raced && picked && picked.venue === v.id && picked.date === d && picked.s === s && picked.e === e) {
+            raced = true;
+            occ(v.id, d, s, e); // 送出前被他人預約
+          }
+          if (flags.suspended) errs.push(T.suspended);
+          if (flags.limit) errs.push(T.limit);
+          var past = d < P.NOW.date || (d === P.NOW.date && s < NOW_MIN);
+          if (past) errs.push(T.past);
+          else if (d > HORIZON) errs.push(T.far);
+          else {
+            var o = openFor(v, d);
+            if (!o || s < o[0] || e > o[1]) errs.push(T.open);
+          }
+          if (e - s > 240) errs.push(T.duration);
+          if (att > v.cap) errs.push(T.cap(v.cap));
+          var occupied = !freeRange(v.id, d, s, e);
+          if (occupied) errs.push(T.occupied);
+          var r = { errs: errs, occupied: occupied };
+          if (occupied && errs.length === 1 && !flags.nosuggest) {
+            var excl = editing && v.id === EDIT.venue ? { date: EDIT.date, s: P.min(EDIT.s), e: P.min(EDIT.e) } : null;
+            r.suggestions = findSlots(v, d, s, e, att, excl);
+            r.suggestions.venues = findVenues(v, d, s, e, att);
+          }
+          return r;
+        }
+
+        function resultPanel(text) {
+          form.hidden = true;
+          errBox.hidden = true;
+          var p = h(
+            "div",
+            { class: "alert ok", tid: "booking-result", role: "status" },
+            h("p", { style: "margin:0 0 10px;font-weight:700", text: text }),
+            h("div", { class: "row", style: "margin-top:10px" }, h("a", { class: "btn primary", tid: "booking-go-my-bookings", href: "states.html", text: "前往我的預約" }))
+          );
+          root.appendChild(p);
+          p.setAttribute("tabindex", "-1");
+          p.focus();
+        }
+
+        var sending = false,
+          attempted = false;
+        function doSubmit() {
+          if (sending) return; // 連按兩次只送出一次
+          attempted = true;
+          errBox.hidden = true;
+          errBox.innerHTML = "";
+          notice.textContent = "";
+          if (!frontCheck()) return;
+          sending = true;
+          busy(true);
+          setTimeout(function () {
+            var r = server();
+            sending = false;
+            busy(false);
+            if (r.net || r.errs.length) {
+              showErrors(r);
+              if (flags.autoclick && !clicked) {
+                clicked = true;
+                setTimeout(function () {
+                  var sel =
+                    flags.autoclick === "slot-after"
+                      ? '[data-testid="alt-slot-after"]'
+                      : flags.autoclick === "slot-before"
+                        ? '[data-testid="alt-slot-before"]'
+                        : '[data-testid="alt-venue-option"][data-id="' + flags.autoclick.split(":")[1] + '"]';
+                  var b = document.querySelector(sel);
+                  if (b) b.click();
+                  if (flags.autosend) setTimeout(doSubmit, 300);
+                }, 300);
+              }
+              return;
+            }
+            var v = curVenue(),
+              st = v.approval ? "pending" : "confirmed",
+              when = sub(f.date.value, f.start.value, f.end.value);
+            if (rebook) {
+              P.toast(st === "pending" ? "已送出預約申請，狀態：" + P.statusText(st) : "已為你預約，狀態：" + P.statusText(st));
+              return;
+            }
+            if (editing) resultPanel("預約已更新，目前狀態：" + P.statusText(st) + "。");
+            else
+              resultPanel(
+                st === "confirmed"
+                  ? "預約已成立（已確認）：" + v.name + "，" + when + "。"
+                  : "預約申請已送出，等待審核（待審核）。審核期間已為您保留 " + when + "。"
+              );
+          }, 600);
+        }
+        form.addEventListener("submit", function (ev) {
+          ev.preventDefault();
+          doSubmit();
+        });
+        fields.forEach(function (c) {
+          c.addEventListener("blur", function () {
+            if (attempted) frontCheck(true);
+          });
+        });
+        [f.venue, f.date, f.start, f.end].forEach(function (c) {
+          c.addEventListener("change", function () {
+            notice.textContent = "";
+          });
+        });
+        /* 失焦提示：長度上限與人數上限只提示，不攔截送出 */
+        function softCheck() {
+          var s = f.start.value ? P.min(f.start.value) : null,
+            e = f.end.value ? P.min(f.end.value) : null;
+          if (s !== null && e !== null) {
+            if (e <= s) P.fieldErr(f.end, "結束時間須晚於開始時間。請重新選擇。");
+            else if (e - s > 240) P.fieldErr(f.end, T.duration);
+            else P.fieldErr(f.end, "");
+          }
+          var n = parseInt(f.att.value, 10);
+          if (f.att.value !== "") {
+            if (!(n >= 1)) P.fieldErr(f.att, "請輸入人數，須為 1 以上的整數。");
+            else if (n > curVenue().cap) P.fieldErr(f.att, T.cap(curVenue().cap));
+            else P.fieldErr(f.att, "");
+          }
+        }
+        if (!rebook)
+          f.venue.addEventListener("change", function () {
+            updInfo();
+            softCheck();
+          });
+        f.end.addEventListener("change", softCheck);
+        f.att.addEventListener("blur", softCheck);
+
+        if (flags.autosubmit) setTimeout(doSubmit, 0);
+      })();
+    </script>
+  </body>
+</html>

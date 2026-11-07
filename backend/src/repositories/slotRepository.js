@@ -73,3 +73,18 @@ export async function listOccupied(conn, venueId, fromAt, toAt) {
   );
   return rows;
 }
+
+export async function findOccupiedVenueIds(conn, venueIds, slotStarts) {
+  const ids = [...new Set(venueIds)];
+  const starts = [...slotStarts];
+  if (!ids.length || !starts.length) {
+    return new Set();
+  }
+  const [rows] = await conn.query(
+    `SELECT DISTINCT venue_id FROM booking_slots
+     WHERE venue_id IN (${ids.map(() => "?").join(", ")})
+       AND slot_start_at IN (${starts.map(() => "?").join(", ")})`,
+    [...ids, ...starts],
+  );
+  return new Set(rows.map((row) => Number(row.venue_id)));
+}

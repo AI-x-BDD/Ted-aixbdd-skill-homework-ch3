@@ -1037,3 +1037,73 @@ h1 + .lead {
 .rebook-mode .rebook-venue-row .rebook-general-link {
   align-self: center;
 }
+
+/* 撞期替代建議（UI-01、UI-02）：窄螢幕換行、可點目標至少 44px、不橫向溢出 */
+.alt-suggestions {
+  margin-top: 12px;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.alt-section {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.alt-section h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.alt-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.alt-button {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-height: 44px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 12px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.alt-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.alt-dir {
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+.alt-empty {
+  margin: 0;
+}
+.alt-notice {
+  margin: 0 0 12px;
+  overflow-wrap: anywhere;
+}
+
+/* 同時段其他可用場地（UI-02）：沿用 .alt-section、.alt-buttons、.alt-button */
+.alt-venue-approval {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+.alt-venues-empty {
+  margin: 0;
+}
+.alt-venues-note {
+  margin: 0;
+  font-size: 0.85rem;
+}

@@ -2,8 +2,11 @@ import {
   OccupiedError,
   deleteByHolder,
   deleteByHolderFrom,
+  findOccupiedVenueIds,
   insertRange,
+  listOccupied,
 } from "../repositories/slotRepository.js";
+import { fromTaipei } from "../../../shared/src/taipei.js";
 
 const listeners = [];
 
@@ -57,6 +60,41 @@ export async function notifyReleased(conn, venueId, range, current) {
   for (const listener of listeners) {
     await listener(conn, venueId, range, current);
   }
+}
+
+export async function isRangeOccupied(conn, venueId, startAt, endAt) {
+  const occupied = await findOccupiedVenueIds(
+    conn,
+    [venueId],
+    slotStartsFor(startAt, endAt),
+  );
+  return occupied.has(Number(venueId));
+}
+
+export async function loadDayOccupied(
+  conn,
+  venueId,
+  date,
+  { excludeHolder } = {},
+) {
+  const rows = await listOccupied(
+    conn,
+    venueId,
+    fromTaipei(date, "00:00"),
+    fromTaipei(date, "24:00"),
+  );
+  const starts = new Set();
+  for (const row of rows) {
+    if (
+      excludeHolder &&
+      row.holder_type === excludeHolder.type &&
+      Number(row.holder_id) === Number(excludeHolder.id)
+    ) {
+      continue;
+    }
+    starts.add(new Date(row.slot_start_at).getTime());
+  }
+  return starts;
 }
 
 export { OccupiedError };

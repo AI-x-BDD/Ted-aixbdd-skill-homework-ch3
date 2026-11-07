@@ -1,7 +1,17 @@
-import { REBOOK_TEXT } from "../../../shared/src/copy.js";
+import {
+  ALT_TEXT,
+  BOOKING_STATUS_LABELS,
+  REBOOK_TEXT,
+} from "../../../shared/src/copy.js";
+
+const NETWORK_ERROR = "無法送出預約。請檢查網路連線後再試一次。";
 import { formatTaipei } from "../../../shared/src/taipei.js";
 import { get, post, put } from "../api/client.js";
 import { mountPage } from "../components/nav.js";
+import {
+  renderSlotSuggestions,
+  renderVenueSuggestions,
+} from "../components/suggestions.js";
 import { showToast } from "../components/toast.js";
 import { openWaitlistDialog } from "../components/waitlistDialog.js";
 import { h } from "../lib/h.js";
@@ -315,7 +325,10 @@ export async function render(container, params = {}) {
       ? `可容納 ${item.capacity} 人；${item.requiresApproval ? "需要審核，送出後為待審核並先占用時段" : "送出後立即成立"}`
       : "";
   }
-  venue.addEventListener("change", updateInfo);
+  venue.addEventListener("change", () => {
+    updateInfo();
+    clearAppliedNotice();
+  });
   updateInfo();
 
   recBox.append(
@@ -470,9 +483,11 @@ export async function render(container, params = {}) {
     const violations = error.violations ?? [];
     errBox.hidden = false;
     const title =
-      rebookMode && violations.length
-        ? REBOOK_TEXT.errorListTitle
-        : (error.message ?? "無法送出預約。");
+      error.status === 0
+        ? NETWORK_ERROR
+        : violations.length
+          ? REBOOK_TEXT.errorListTitle
+          : (error.message ?? "無法送出預約。");
     errBox.replaceChildren(h("p", { text: title }));
     if (violations.length) {
       const list = h("ul");
@@ -501,7 +516,76 @@ export async function render(container, params = {}) {
         }),
       );
     }
+    // 建議區塊的外層容器：只在唯一未通過的規則是「時段被占用」時出現（UI-01、UI-02）
+    if (
+      error.suggestions &&
+      violations.length === 1 &&
+      violations[0].rule === "occupied" &&
+      !recToggle.checked
+    ) {
+      const altBox = h("div", { testid: "alt-suggestions" });
+      altBox.append(
+        renderSlotSuggestions(error.suggestions, {
+          onPick: (picked) =>
+            applySuggestion(
+              picked,
+              ALT_TEXT.appliedSlot(
+                picked.date,
+                `${picked.startTime}–${picked.endTime}`,
+                submitLabel(),
+              ),
+            ),
+        }),
+      );
+      // 同時段其他可用場地：再預約模式場地固定，不渲染（FR-016）
+      if (!rebookMode) {
+        altBox.append(
+          renderVenueSuggestions(error.suggestions.venues ?? [], {
+            onPick: (venue) =>
+              applySuggestion(
+                { venueId: venue.venueId },
+                ALT_TEXT.appliedVenue(venue.name, submitLabel()),
+              ),
+          }),
+        );
+      }
+      errBox.append(altBox);
+    }
     errBox.focus();
+  }
+
+  function clearAppliedNotice() {
+    root.querySelector('[data-testid="alt-applied-notice"]')?.remove();
+  }
+
+  function submitLabel() {
+    return editId ? "儲存修改" : REBOOK_TEXT.submitLabel;
+  }
+
+  // 點選建議後的共用處理：只改欄位、清除錯誤與舊建議、顯示已填入提示，不送出
+  function applySuggestion(changes, noticeText) {
+    if (changes.date !== undefined) date.value = changes.date;
+    if (changes.startTime !== undefined) start.value = changes.startTime;
+    if (changes.endTime !== undefined) end.value = changes.endTime;
+    if (changes.venueId !== undefined) {
+      venue.value = String(changes.venueId);
+      updateInfo();
+    }
+    errBox.hidden = true;
+    errBox.replaceChildren();
+    for (const el of form.querySelectorAll("input, select")) {
+      setError(el, "");
+    }
+    clearAppliedNotice();
+    form.before(
+      h("div", {
+        class: "alert ok alt-notice",
+        role: "status",
+        testid: "alt-applied-notice",
+        text: noticeText,
+      }),
+    );
+    submit.focus();
   }
 
   function resultPanel(text, extra) {
@@ -661,7 +745,9 @@ export async function render(container, params = {}) {
     }
     const capacity = selectedVenue()?.capacity;
     if (capacity && count > capacity) {
-      return REBOOK_TEXT.attendeesOverCapacity(capacity);
+      return rebookMode
+        ? REBOOK_TEXT.attendeesOverCapacity(capacity)
+        : `人數超過容納人數（可容納 ${capacity} 人）。請減少人數或改選其他場地。`;
     }
     return "";
   }
@@ -687,7 +773,7 @@ export async function render(container, params = {}) {
     return message;
   }
 
-  if (rebookMode) {
+  {
     subject.addEventListener("blur", () =>
       setError(
         subject,
@@ -708,15 +794,26 @@ export async function render(container, params = {}) {
       el.disabled = on;
     }
     submit.disabled = on;
-    submit.textContent = on ? REBOOK_TEXT.submitting : REBOOK_TEXT.submitLabel;
+    submit.textContent = on
+      ? REBOOK_TEXT.submitting
+      : editId
+        ? "儲存修改"
+        : REBOOK_TEXT.submitLabel;
   }
 
-  async function submitRebook() {
+  // 送出前的必填與格式檢查（三種模式共用）；人數超過容納人數與長度超過上限
+  // 不在此攔截，交由後端與「時段被占用」一併並列回報（FR-008、FR-017）
+  function preSubmitCheck() {
     const checks = [
       [date, !date.value, REBOOK_TEXT.requiredDate],
       [start, !start.value, REBOOK_TEXT.requiredStart],
       [end, !end.value, REBOOK_TEXT.requiredEnd],
       [subject, !subject.value.trim(), REBOOK_TEXT.requiredSubject],
+      [
+        attendees,
+        !(Number.parseInt(attendees.value, 10) >= 1),
+        REBOOK_TEXT.requiredAttendees,
+      ],
     ];
     let firstInvalid = null;
     for (const [el, missing, message] of checks) {
@@ -725,30 +822,50 @@ export async function render(container, params = {}) {
         firstInvalid = el;
       }
     }
-    const attendeeMessage = attendeesMessage();
-    setError(attendees, attendeeMessage);
-    if (attendeeMessage && !firstInvalid) {
-      firstInvalid = attendees;
-    }
-    const endError = checkEnd();
-    if (endError && !firstInvalid) {
-      firstInvalid = end;
+    if (start.value && end.value && end.value <= start.value) {
+      setError(end, REBOOK_TEXT.endBeforeStart);
+      firstInvalid ??= end;
     }
     if (firstInvalid) {
       firstInvalid.focus();
+      return false;
+    }
+    return true;
+  }
+
+  async function submitBooking() {
+    if (!preSubmitCheck()) {
       return;
     }
     setBusy(true);
     try {
-      const created = await post("/api/bookings", payload());
-      showToast(
-        created.status === "pending"
-          ? REBOOK_TEXT.successPending
-          : REBOOK_TEXT.successConfirmed,
-      );
-      window.location.hash = "#/bookings";
+      if (editId) {
+        const updated = await put(`/api/bookings/${editId}`, payload());
+        resultPanel(
+          `預約已更新，目前狀態：${BOOKING_STATUS_LABELS[updated.status] ?? updated.status}。`,
+        );
+      } else {
+        const created = await post("/api/bookings", payload());
+        if (rebookMode) {
+          showToast(
+            created.status === "pending"
+              ? REBOOK_TEXT.successPending
+              : REBOOK_TEXT.successConfirmed,
+          );
+          window.location.hash = "#/bookings";
+        } else {
+          resultPanel(
+            created.status === "pending"
+              ? `預約申請已送出，等待審核（待審核）。審核期間已為您保留 ${created.date} ${created.startTime}–${created.endTime}。`
+              : `預約已成立（已確認）：${created.venueName}，${created.date} ${created.startTime}–${created.endTime}。`,
+          );
+        }
+      }
     } catch (error) {
       showErrors(error);
+      if (!rebookMode) {
+        showToast(error.message ?? "無法送出預約。", "error");
+      }
       setBusy(false);
     }
   }
@@ -756,45 +873,12 @@ export async function render(container, params = {}) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     errBox.hidden = true;
-    if (rebookMode) {
-      await submitRebook();
-      return;
-    }
-    if (!editId && recToggle.checked) {
+    errBox.replaceChildren();
+    clearAppliedNotice();
+    if (!editId && !rebookMode && recToggle.checked) {
       await checkSeries();
       return;
     }
-    let ok = true;
-    if (!subject.value.trim()) {
-      setError(subject, "請輸入主題。");
-      ok = false;
-    } else setError(subject, "");
-    if (!(Number.parseInt(attendees.value, 10) >= 1)) {
-      setError(attendees, "請輸入人數，須為 1 以上的整數。");
-      ok = false;
-    } else setError(attendees, "");
-    if (!ok) return;
-    submit.disabled = true;
-    submit.textContent = "送出中…";
-    try {
-      if (editId) {
-        const updated = await put(`/api/bookings/${editId}`, payload());
-        resultPanel(
-          `預約已更新：${updated.venueName}，${updated.date} ${updated.startTime}–${updated.endTime}。`,
-        );
-      } else {
-        const created = await post("/api/bookings", payload());
-        resultPanel(
-          created.status === "pending"
-            ? `預約申請已送出，等待審核（待審核）。審核期間已為您保留 ${created.date} ${created.startTime}–${created.endTime}。`
-            : `預約已成立（已確認）：${created.venueName}，${created.date} ${created.startTime}–${created.endTime}。`,
-        );
-      }
-    } catch (error) {
-      showErrors(error);
-      showToast(error.message ?? "無法送出預約。", "error");
-      submit.disabled = false;
-      submit.textContent = editId ? "儲存修改" : "送出預約";
-    }
+    await submitBooking();
   });
 }

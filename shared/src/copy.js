@@ -101,3 +101,29 @@ export function notificationMessage(type, params = {}) {
   }
   return template(params);
 }
+
+// UI-01 同場地空檔建議（ui-contract.md › UI-01 › 文案與無障礙）
+export const ALT_TEXT = {
+  slotsTitle: "同場地最近的空檔",
+  slotsDescription:
+    "同一天、時間長度相同的空檔。點選後只會填入日期與時間，不會自動送出。",
+  directionBefore: "較早",
+  directionAfter: "較晚",
+  slotButtonLabel: (direction, date, range) =>
+    `改選${direction}的時段：${date} ${range}`,
+  noSlotsToday: "當天已無空檔",
+  appliedSlot: (date, range, submitLabel) =>
+    `已改為 ${date} ${range}，尚未送出。請確認後按「${submitLabel}」。`,
+  // UI-02 同時段其他可用場地（ui-contract.md › UI-02 › 文案與無障礙）
+  venuesTitle: "同時段其他可用場地",
+  venuesDescription:
+    "同日期與時間仍可預約、容納人數也足夠的場地。點選後只會更換場地，不會自動送出。",
+  venueButtonLabel: (name, capacity, approvalNote) =>
+    `改選場地：${name}，可容納 ${capacity} 人${approvalNote}`,
+  venueButtonText: (name, capacity) => `${name}　可容納 ${capacity} 人`,
+  approvalTag: "需審核",
+  approvalDescription: "標示「需審核」的場地，送出後為待審核並先占用時段。",
+  noVenues: "此時段沒有其他可用場地",
+  appliedVenue: (name, submitLabel) =>
+    `已改為「${name}」，尚未送出。請確認後按「${submitLabel}」。`,
+};

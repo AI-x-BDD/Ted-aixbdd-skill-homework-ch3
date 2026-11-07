@@ -1,5 +1,13 @@
 export class ApiError extends Error {
-  constructor({ status, message, fields, violations, conflicts, impact }) {
+  constructor({
+    status,
+    message,
+    fields,
+    violations,
+    conflicts,
+    impact,
+    suggestions,
+  }) {
     super(message);
     this.status = status;
     this.message = message;
@@ -7,6 +15,7 @@ export class ApiError extends Error {
     this.violations = violations;
     this.conflicts = conflicts;
     this.impact = impact;
+    this.suggestions = suggestions;
   }
 }
 
@@ -46,6 +55,7 @@ async function request(method, path, body) {
       violations: data.violations,
       conflicts: data.conflicts,
       impact: data.impact,
+      suggestions: data.suggestions,
     });
   }
   return data;
