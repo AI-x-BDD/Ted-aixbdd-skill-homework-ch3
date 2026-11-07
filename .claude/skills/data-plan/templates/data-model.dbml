@@ -1,0 +1,33 @@
+Project {{project_name}} {
+  Note: '''
+    # 資料模型：{{feature_name}}
+
+    **功能分支**：`{{feature_branch}}`
+
+    ## 交易邊界
+
+    | 交易 | 範圍 | 失敗處理 |
+    |---|---|---|
+    | {{transaction_name}} | {{transaction_scope}} | {{failure_handling}} |
+  '''
+}
+
+// 重複開始：每張資料表一段
+Table {{table_name}} {
+  // 重複開始：每個欄位一行
+  {{column_name}} {{column_type}} [{{column_settings}}, note: '{{column_note}}']
+  // 重複結束
+
+  indexes {
+    // 重複開始：每個索引一行
+    {{index_columns}} [{{index_settings}}, name: '{{index_name}}']
+    // 重複結束
+  }
+
+  Note: '{{table_purpose}}'
+}
+// 重複結束
+
+// 重複開始：每個關聯一行
+Ref {{ref_name}}: {{child_table}}.{{child_column}} > {{parent_table}}.{{parent_column}} [delete: {{delete_action}}]
+// 重複結束

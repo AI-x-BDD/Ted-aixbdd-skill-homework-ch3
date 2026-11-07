@@ -1,0 +1,419 @@
+openapi: 3.1.0
+info:
+  title: 照片相簿整理器 API
+  version: 1.0.0
+  description: 匯入、相簿列表與排序、相簿內照片瀏覽與刪除。
+servers:
+  - url: http://127.0.0.1:3000
+    description: 本機後端
+tags:
+  - name: 匯入
+  - name: 相簿
+  - name: 照片
+paths:
+  /api/photos:
+    post:
+      tags: [匯入]
+      summary: 匯入一張照片
+      operationId: importPhoto
+      description: 對應選取並匯入多張時的單檔請求。依拍攝日期歸入當日相簿；重複內容回報略過。
+      x-inner-needs:
+        data:
+          - name: photos
+            access: write
+            fields: [content_hash, taken_at, date_estimated, album_id]
+          - name: albums
+            access: write
+            fields: [album_date]
+        files:
+          - name: originals
+            access: write
+          - name: thumbnails
+            access: write
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 原始照片檔
+                thumbnail:
+                  type: string
+                  format: binary
+                  description: 可選的 JPEG 縮圖
+                lastModifiedLocal:
+                  type: string
+                  description: 無 EXIF 時使用的本地檔案時間，格式 YYYY-MM-DDTHH:mm:ss
+      responses:
+        "201":
+          description: 新增成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportCreated"
+        "200":
+          description: 內容重複，已略過
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportDuplicate"
+        "413":
+          description: 檔案超過上限
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: 不支援的檔案格式
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: 檔案損毀或無法讀取
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/albums:
+    get:
+      tags: [相簿]
+      summary: 列出相簿
+      operationId: listAlbums
+      description: 回傳名稱、照片數、封面與目前順序。未自訂前依代表日期由新到舊。
+      x-inner-needs:
+        data:
+          - name: albums
+            access: read
+            fields: [id, album_date, position, order_mode]
+          - name: photos
+            access: read
+            fields: [album_id, thumbnail]
+        files: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 60
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: 相簿分頁
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlbumList"
+  /api/albums/{albumId}/position:
+    put:
+      tags: [相簿]
+      summary: 移動相簿順序
+      operationId: moveAlbum
+      description: 把指定相簿移到另一本之前；beforeAlbumId 為空表示移到最後。整個移動全有或全無。
+      x-inner-needs:
+        data:
+          - name: albums
+            access: write
+            fields: [id, position, order_mode]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/albumId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                beforeAlbumId:
+                  type: ["string", "null"]
+                  description: 目標前方的相簿；null 表示移到最後
+      responses:
+        "200":
+          description: 移動成功，回傳更新後的列表片段
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlbumList"
+        "409":
+          description: 儲存失敗，順序未變更
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 相簿不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/albums/{albumId}/photos:
+    get:
+      tags: [照片]
+      summary: 列出相簿內照片
+      operationId: listAlbumPhotos
+      description: 依拍攝時間由早到晚，以游標分頁。
+      x-inner-needs:
+        data:
+          - name: photos
+            access: read
+            fields: [id, album_id, taken_at, date_estimated, has_thumbnail]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/albumId"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+        - name: afterTakenAt
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: afterId
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 照片分頁
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PhotoList"
+        "404":
+          description: 相簿不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/photos/{photoId}:
+    delete:
+      tags: [照片]
+      summary: 從應用程式刪除照片
+      operationId: deletePhoto
+      description: 移除應用程式中的照片與縮圖，不修改使用者裝置上的原始檔。最後一張刪除後相簿一併移除。
+      x-inner-needs:
+        data:
+          - name: photos
+            access: write
+            fields: [id, album_id]
+          - name: albums
+            access: write
+            fields: [id]
+        files:
+          - name: originals
+            access: delete
+          - name: thumbnails
+            access: delete
+      parameters:
+        - $ref: "#/components/parameters/photoId"
+      responses:
+        "200":
+          description: 已刪除
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PhotoDeleted"
+        "404":
+          description: 照片不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/photos/{photoId}/original:
+    get:
+      tags: [照片]
+      summary: 取得原圖
+      operationId: getOriginalPhoto
+      x-inner-needs:
+        data:
+          - name: photos
+            access: read
+            fields: [id, content_hash]
+        files:
+          - name: originals
+            access: read
+      parameters:
+        - $ref: "#/components/parameters/photoId"
+      responses:
+        "200":
+          description: 原始檔二進位
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/heic:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: 照片或檔案不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/photos/{photoId}/thumbnail:
+    get:
+      tags: [照片]
+      summary: 取得縮圖
+      operationId: getPhotoThumbnail
+      x-inner-needs:
+        data:
+          - name: photos
+            access: read
+            fields: [id, content_hash, has_thumbnail]
+        files:
+          - name: thumbnails
+            access: read
+      parameters:
+        - $ref: "#/components/parameters/photoId"
+      responses:
+        "200":
+          description: JPEG 縮圖
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: 沒有縮圖或照片不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  parameters:
+    albumId:
+      name: albumId
+      in: path
+      required: true
+      schema:
+        type: string
+    photoId:
+      name: photoId
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: 繁體中文，說明發生什麼與可以怎麼做
+          examples:
+            - 這個檔案不是支援的照片格式。請改選 JPEG、PNG 或 HEIC。
+            - 無法儲存相簿順序，已還原剛才的排列。請再試一次。
+    ImportCreated:
+      type: object
+      required: [status, photo, album]
+      properties:
+        status:
+          type: string
+          const: created
+        photo:
+          $ref: "#/components/schemas/Photo"
+        album:
+          $ref: "#/components/schemas/Album"
+    ImportDuplicate:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: duplicate
+    Album:
+      type: object
+      required: [id, name, photoCount, coverUrl]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          description: 顯示名稱，例如 2026年10月1日（星期四）
+        albumDate:
+          type: string
+          format: date
+        photoCount:
+          type: integer
+        coverUrl:
+          type: ["string", "null"]
+    AlbumList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Album"
+        total:
+          type: integer
+    Photo:
+      type: object
+      required: [id, albumId, takenAt, dateEstimated, thumbnailUrl]
+      properties:
+        id:
+          type: string
+        albumId:
+          type: string
+        takenAt:
+          type: string
+          format: date-time
+        dateEstimated:
+          type: boolean
+        thumbnailUrl:
+          type: ["string", "null"]
+        originalUrl:
+          type: string
+        previousId:
+          type: ["string", "null"]
+        nextId:
+          type: ["string", "null"]
+    PhotoList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Photo"
+        nextCursor:
+          type: ["object", "null"]
+          properties:
+            afterTakenAt:
+              type: string
+              format: date-time
+            afterId:
+              type: string
+    PhotoDeleted:
+      type: object
+      required: [photoId, albumRemoved]
+      properties:
+        photoId:
+          type: string
+        albumRemoved:
+          type: boolean
+          description: 該相簿已無照片而被移除時為 true

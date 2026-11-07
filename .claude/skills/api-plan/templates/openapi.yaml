@@ -1,0 +1,88 @@
+openapi: 3.1.0
+info:
+  title: { { api_title } }
+  version: { { api_version } }
+  description: { { api_description } }
+servers:
+  - url: { { server_url } }
+    description: { { server_description } }
+tags:
+  # 重複開始：每個資源分組一項
+  - name: { { tag_name } }
+  # 重複結束
+paths:
+  # 重複開始：每個路徑一段
+  { { api_path } }:
+    # 重複開始：每個方法一段
+    { { http_method } }:
+      tags: [{ { tag_name } }]
+      summary: { { operation_summary } }
+      operationId: { { operation_id } }
+      description: { { operation_description } }
+      x-inner-needs:
+        data:
+          # 重複開始：每個讀寫的資料一項
+          - name: { { data_name } }
+            access: { { data_access } }
+            fields: [{ { data_fields } }]
+          # 重複結束
+        files:
+          # 重複開始：每個讀寫的儲存區一項
+          - name: { { file_area_name } }
+            access: { { file_access } }
+          # 重複結束
+      parameters:
+        # 重複開始：每個參數一項
+        - name: { { parameter_name } }
+          in: { { parameter_location } }
+          schema:
+            type: { { parameter_type } }
+        # 重複結束
+      requestBody:
+        required: { { request_body_required } }
+        content:
+          { { request_media_type } }:
+            schema: { { request_schema } }
+      responses:
+        # 重複開始：每個回應狀態碼一段
+        "{{status_code}}":
+          description: { { response_description } }
+          content:
+            { { response_media_type } }:
+              schema: { { response_schema } }
+        # 重複結束
+    # 重複結束
+  # 重複結束
+components:
+  parameters:
+    # 重複開始：每個共用參數一段
+    { { shared_parameter_key } }:
+      name: { { parameter_name } }
+      in: { { parameter_location } }
+      required: { { parameter_required } }
+      schema:
+        type: { { parameter_type } }
+    # 重複結束
+  schemas:
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: { { error_message_description } }
+          examples:
+            # 重複開始：每個錯誤訊息例子一項
+            - { { error_message_example } }
+            # 重複結束
+    # 重複開始：每個資料結構一段
+    { { schema_name } }:
+      type: object
+      required: [{ { required_properties } }]
+      properties:
+        # 重複開始：每個屬性一段
+        { { property_name } }:
+          type: { { property_type } }
+          description: { { property_description } }
+        # 重複結束
+    # 重複結束
