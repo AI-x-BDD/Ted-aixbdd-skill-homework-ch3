@@ -1,0 +1,71 @@
+:root {
+  color-scheme: light dark;
+  /* 清爽 SaaS：中性底色微偏靛紫，細邊框、低陰影 */
+  --bg: #f7f7fb;
+  --surface: #ffffff;
+  --surface-2: #f0f0f7;
+  --text: #1c1c2b;
+  --muted: #6a6a80;
+  --line: #e4e4ee;
+  --accent: #5b5bd6;
+  --accent-soft: #ececfc;
+  --on-accent: #ffffff;
+  --ink: #1c1c2b;
+  --ink-text: #ffffff;
+  --ok: #17784a;
+  --ok-soft: #dff2e7;
+  --warn: #8a5a00;
+  --warn-soft: #fbefd2;
+  --danger: #c3262d;
+  --danger-soft: #fbe3e4;
+  --maint: #7a4fb5;
+  --maint-soft: #efe6f8;
+  --radius: 10px;
+  --radius-sm: 8px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --font-size-12: 12px;
+  --font-size-13: 13px;
+  --font-size-14: 14px;
+  --font-size-16: 16px;
+  --font-size-18: 18px;
+  --font-size-20: 20px;
+  --font-size-26: 26px;
+  --shadow: 0 1px 2px rgba(28, 28, 60, 0.04);
+  --shadow-pop: 0 8px 24px rgba(28, 28, 60, 0.12);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC",
+    "Microsoft JhengHei", sans-serif;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f0f17;
+    --surface: #17171f;
+    --surface-2: #22222d;
+    --text: #ececf5;
+    --muted: #9a9ab0;
+    --line: #2e2e3c;
+    --accent: #9a9cff;
+    --accent-soft: rgba(154, 156, 255, 0.16);
+    --on-accent: #14141f;
+    --ink: #ececf5;
+    --ink-text: #0f0f17;
+    --ok: #4cc38a;
+    --ok-soft: rgba(76, 195, 138, 0.16);
+    --warn: #e6b84f;
+    --warn-soft: rgba(230, 184, 79, 0.16);
+    --danger: #ff7b80;
+    --danger-soft: rgba(255, 123, 128, 0.16);
+    --maint: #c3a6f2;
+    --maint-soft: rgba(195, 166, 242, 0.16);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.45);
+  }
+}

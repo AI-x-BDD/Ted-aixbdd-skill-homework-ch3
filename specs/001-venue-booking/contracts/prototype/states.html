@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>狀態入口</title>
+    <link rel="stylesheet" href="proto.css" />
+    <style>
+      main.entry {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 40px 16px 72px;
+      }
+      main.entry ul {
+        list-style: none;
+        margin: 0 0 8px;
+        padding: 6px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+      }
+      main.entry li + li {
+        border-top: 1px solid var(--line);
+      }
+      main.entry li a {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 44px;
+        padding: 8px 12px;
+        color: var(--text);
+        text-decoration: none;
+        font-weight: 600;
+        flex-wrap: wrap;
+      }
+      main.entry li a:hover {
+        background: var(--bg);
+        border-radius: 10px;
+      }
+      main.entry li a::before {
+        content: "";
+        flex: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--ok);
+      }
+      main.entry li a[href*="state=loading"]::before {
+        background: var(--accent);
+      }
+      main.entry li a[href*="state=empty"]::before {
+        background: var(--warn);
+      }
+      main.entry li a[href*="state=error"]::before,
+      main.entry li a[href*="role=employee"][data-denied]::before {
+        background: var(--danger);
+      }
+      code {
+        margin-left: auto;
+        padding: 2px 8px;
+        border-radius: 8px;
+        background: var(--surface-2);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 500;
+        word-break: break-all;
+      }
+      .note {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.7;
+        margin: 0 0 6px;
+        padding-left: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="entry">
+      <h1>狀態入口</h1>
+      <p class="lead">
+        場地／會議室預約系統的 HTML 原型。每個頁面都能以
+        <code>?state=</code>
+        切換到載入、空狀態與錯誤；<code>?role=employee</code>、<code>?role=reviewer</code>、<code>?role=admin</code>（預設）切換導覽列與權限。原型使用內嵌假資料，假的「現在」為
+        2026年11月7日（週六）14:00。重新整理即還原假資料。
+      </p>
+
+      <h2>UI-01 登入與密碼（login.html）</h2>
+      <p class="note">
+        成功：Email 任意、密碼 <code style="margin: 0">Passw0rd!</code>（wang@
+        為管理員、lin@ 為審核者）。<code style="margin: 0"
+          >disabled@example.com</code
+        >
+        顯示帳號已停用，<code style="margin: 0">offline@example.com</code>
+        顯示連線失敗，<code style="margin: 0">reset@example.com</code>
+        進入首次登入強制改密碼。
+      </p>
+      <ul>
+        <li>
+          <a href="login.html">登入：成功<code>login.html</code></a>
+        </li>
+        <li>
+          <a href="login.html?state=loading"
+            >登入：載入<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="login.html?state=empty"
+            >登入：空狀態（空白表單，送出顯示必填提示）<code
+              >?state=empty</code
+            ></a
+          >
+        </li>
+        <li>
+          <a href="login.html?state=error"
+            >登入：錯誤（Email 或密碼錯誤）<code>?state=error</code></a
+          >
+        </li>
+        <li>
+          <a href="login.html?notice=changed"
+            >登入：改密碼成功後的提示<code>?notice=changed</code></a
+          >
+        </li>
+        <li>
+          <a href="login.html?notice=expired"
+            >登入：登入逾時提示<code>?notice=expired</code></a
+          >
+        </li>
+        <li>
+          <a href="login.html?view=change&amp;role=employee"
+            >變更密碼：成功<code>?view=change</code></a
+          >
+        </li>
+        <li>
+          <a href="login.html?view=change&amp;forced=1&amp;role=employee"
+            >變更密碼：首次登入強制改密碼<code
+              >?view=change&amp;forced=1</code
+            ></a
+          >
+        </li>
+        <li>
+          <a href="login.html?view=change&amp;state=loading&amp;role=employee"
+            >變更密碼：載入<code>&amp;state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="login.html?view=change&amp;state=error&amp;role=employee"
+            >變更密碼：錯誤（舊密碼不正確）<code>&amp;state=error</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-02 場地搜尋與行事曆（venues.html）</h2>
+      <ul>
+        <li>
+          <a href="venues.html">搜尋與列表：成功<code>venues.html</code></a>
+        </li>
+        <li>
+          <a href="venues.html?state=loading"
+            >搜尋與列表：載入<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?state=empty"
+            >搜尋與列表：空狀態（沒有符合條件的場地）<code
+              >?state=empty</code
+            ></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?state=error"
+            >搜尋與列表：錯誤<code>?state=error</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?id=v1&amp;date=2026-11-09"
+            >行事曆：日檢視成功<code>?id=v1&amp;date=2026-11-09</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?id=v1&amp;view=week&amp;date=2026-11-09"
+            >行事曆：週檢視成功<code>&amp;view=week</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?id=v1&amp;state=loading"
+            >行事曆：載入<code>?id=v1&amp;state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?id=v1&amp;state=empty"
+            >行事曆：空狀態（整天不開放）<code>?id=v1&amp;state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?id=v1&amp;state=error"
+            >行事曆：錯誤<code>?id=v1&amp;state=error</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-03 預約表單（booking-form.html）</h2>
+      <p class="note">
+        試試：主題填「持有」或「暫停」會回傳對應規則錯誤；勾選重複預約後按「檢查場次」可看衝突清單；主題填「搶先」可看到送出時的新衝突。
+      </p>
+      <ul>
+        <li>
+          <a
+            href="booking-form.html?venue=v1&amp;date=2026-11-10&amp;start=09:00&amp;end=10:00"
+            >新增預約：成功<code>booking-form.html</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?state=loading"
+            >新增預約：載入<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?state=empty"
+            >新增預約：空狀態（沒有啟用場地）<code>?state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?state=error"
+            >新增預約：錯誤（欄位錯誤、規則清單、登記候補）<code
+              >?state=error</code
+            ></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?edit=b1"
+            >修改預約：成功<code>?edit=b1</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?edit=b4&amp;state=error"
+            >修改預約：錯誤（整批待審核不可修改）<code>?edit=b4</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?edit=b5&amp;state=error"
+            >修改預約：錯誤（已結束不可修改）<code>?edit=b5</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-04 我的預約（bookings.html）</h2>
+      <p class="note">
+        「臨時討論」（今天
+        14:30）可報到成功，取消會記為逾時取消；其他已確認預約報到會失敗並顯示可報到時間；週期性場次的取消對話框有範圍選項。
+      </p>
+      <ul>
+        <li>
+          <a href="bookings.html">成功<code>bookings.html</code></a>
+        </li>
+        <li>
+          <a href="bookings.html?tab=past"
+            >成功：已結束分頁<code>?tab=past</code></a
+          >
+        </li>
+        <li>
+          <a href="bookings.html?suspended=1"
+            >成功：預約權限暫停提示<code>?suspended=1</code></a
+          >
+        </li>
+        <li>
+          <a href="bookings.html?state=loading"
+            >載入<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="bookings.html?state=empty"
+            >空狀態<code>?state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="bookings.html?state=error"
+            >錯誤：載入失敗<code>?state=error</code></a
+          >
+        </li>
+        <li>
+          <a href="bookings.html?fail=1"
+            >錯誤：取消失敗（取消「客戶簡報」）<code>?fail=1</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-05 候補（waitlist.html）</h2>
+      <p class="note">
+        登記候補對話框：選在「可預約」的時段會提示直接預約；主題填「重複」顯示已在候補中，填「暫停」顯示暫停。
+      </p>
+      <ul>
+        <li>
+          <a href="waitlist.html">成功<code>waitlist.html</code></a>
+        </li>
+        <li>
+          <a href="waitlist.html?state=loading"
+            >載入<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="waitlist.html?state=empty"
+            >空狀態<code>?state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="waitlist.html?state=error"
+            >錯誤：載入失敗<code>?state=error</code></a
+          >
+        </li>
+        <li>
+          <a href="waitlist.html?fail=limit"
+            >錯誤：確認遞補失敗（持有上限）<code>?fail=limit</code></a
+          >
+        </li>
+        <li>
+          <a href="waitlist.html?fail=suspended"
+            >錯誤：確認遞補失敗（預約權限暫停）<code>?fail=suspended</code></a
+          >
+        </li>
+        <li>
+          <a href="waitlist.html?fail=expired"
+            >錯誤：確認遞補失敗（保留已逾時）<code>?fail=expired</code></a
+          >
+        </li>
+        <li>
+          <a href="waitlist.html?suspended=1"
+            >暫停提示<code>?suspended=1</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-06 站內通知（notifications.html）</h2>
+      <ul>
+        <li>
+          <a href="notifications.html">成功<code>notifications.html</code></a>
+        </li>
+        <li>
+          <a href="notifications.html?state=loading"
+            >載入<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="notifications.html?state=empty"
+            >空狀態<code>?state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="notifications.html?state=error"
+            >錯誤：載入失敗<code>?state=error</code></a
+          >
+        </li>
+        <li>
+          <a href="notifications.html?markfail=1"
+            >錯誤：標記已讀失敗<code>?markfail=1</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-07 待審核（reviews.html）</h2>
+      <ul>
+        <li>
+          <a href="reviews.html?role=reviewer"
+            >成功（審核者，含整批週期性申請）<code>?role=reviewer</code></a
+          >
+        </li>
+        <li>
+          <a href="reviews.html?role=admin"
+            >成功（管理員，由管理員審核的申請）<code>?role=admin</code></a
+          >
+        </li>
+        <li>
+          <a href="reviews.html?role=reviewer&amp;state=loading"
+            >載入<code>&amp;state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="reviews.html?role=reviewer&amp;state=empty"
+            >空狀態<code>&amp;state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="reviews.html?role=reviewer&amp;state=error"
+            >錯誤：載入失敗<code>&amp;state=error</code></a
+          >
+        </li>
+        <li>
+          <a href="reviews.html?role=reviewer&amp;race=1"
+            >錯誤：此申請已被處理<code>&amp;race=1</code></a
+          >
+        </li>
+        <li>
+          <a href="reviews.html?role=employee" data-denied
+            >錯誤：沒有權限<code>?role=employee</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-08 場地與維護管理（admin-venues.html）</h2>
+      <p class="note">
+        試試：停用「大會議室」看影響預覽；加上
+        <code style="margin: 0">changed=1</code>
+        可看影響範圍已變動；維護時段選「大會議室」新增會出現影響對話框。
+      </p>
+      <ul>
+        <li>
+          <a href="admin-venues.html">成功<code>admin-venues.html</code></a>
+        </li>
+        <li>
+          <a href="admin-venues.html?select=v4"
+            >成功：選取場地沒有維護時段<code>?select=v4</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-venues.html?state=loading"
+            >載入<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-venues.html?state=empty"
+            >空狀態<code>?state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-venues.html?state=error"
+            >錯誤：載入失敗<code>?state=error</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-venues.html?changed=1"
+            >錯誤：停用時影響範圍已變動<code>?changed=1</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-venues.html?role=employee" data-denied
+            >錯誤：沒有權限<code>?role=employee</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-09 帳號管理（admin-users.html）</h2>
+      <ul>
+        <li>
+          <a href="admin-users.html">成功<code>admin-users.html</code></a>
+        </li>
+        <li>
+          <a href="admin-users.html?state=loading"
+            >載入<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-users.html?state=empty"
+            >空狀態（搜尋沒有結果）<code>?state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-users.html?state=error"
+            >錯誤：載入失敗<code>?state=error</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-users.html?changed=1"
+            >錯誤：停用時影響範圍已變動<code>?changed=1</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-users.html?role=employee" data-denied
+            >錯誤：沒有權限<code>?role=employee</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-10 全部預約與操作紀錄（admin-bookings.html）</h2>
+      <ul>
+        <li>
+          <a href="admin-bookings.html">成功<code>admin-bookings.html</code></a>
+        </li>
+        <li>
+          <a href="admin-bookings.html?state=loading"
+            >載入<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-bookings.html?state=empty"
+            >空狀態<code>?state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-bookings.html?state=error"
+            >錯誤：載入失敗<code>?state=error</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-bookings.html?fail=1"
+            >錯誤：取消失敗<code>?fail=1</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-bookings.html?role=employee" data-denied
+            >錯誤：沒有權限<code>?role=employee</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-11 規則管理（admin-rules.html）</h2>
+      <ul>
+        <li>
+          <a href="admin-rules.html">成功<code>admin-rules.html</code></a>
+        </li>
+        <li>
+          <a href="admin-rules.html?state=loading"
+            >載入<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-rules.html?state=empty"
+            >空狀態（尚無變更紀錄）<code>?state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-rules.html?state=error"
+            >錯誤：載入失敗<code>?state=error</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-rules.html?fail=1"
+            >錯誤：儲存失敗（輸入 0 可看正整數錯誤）<code>?fail=1</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-rules.html?role=employee" data-denied
+            >錯誤：沒有權限<code>?role=employee</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-12 報表（admin-reports.html）</h2>
+      <ul>
+        <li>
+          <a href="admin-reports.html">成功<code>admin-reports.html</code></a>
+        </li>
+        <li>
+          <a href="admin-reports.html?state=loading"
+            >載入<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-reports.html?state=empty"
+            >空狀態（尚未選區間）<code>?state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-reports.html?state=error"
+            >錯誤：載入失敗<code>?state=error</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-reports.html?exportfail=1"
+            >錯誤：匯出失敗<code>?exportfail=1</code></a
+          >
+        </li>
+        <li>
+          <a href="admin-reports.html?role=employee" data-denied
+            >錯誤：沒有權限<code>?role=employee</code></a
+          >
+        </li>
+      </ul>
+    </main>
+  </body>
+</html>

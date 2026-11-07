@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>規則管理</title>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("admin-rules.html", "admin");
+        if (!main) return;
+        var rules = [
+          { k: "max-duration", n: "單次時長上限", v: 4, u: "小時" },
+          { k: "max-advance-days", n: "最遠可預約天數", v: 30, u: "天" },
+          { k: "max-active-bookings", n: "每人有效預約上限", v: 5, u: "筆" },
+          {
+            k: "max-recurring-series",
+            n: "每人週期性預約批數上限",
+            v: 2,
+            u: "批",
+          },
+          {
+            k: "recurring-max-months",
+            n: "週期性預約最長月數",
+            v: 3,
+            u: "個月",
+          },
+          { k: "late-cancel-threshold", n: "逾時取消門檻", v: 1, u: "小時" },
+          { k: "waitlist-confirm-window", n: "候補確認時限", v: 30, u: "分鐘" },
+          { k: "waitlist-cutoff", n: "候補截止門檻", v: 1, u: "小時" },
+          {
+            k: "checkin-open",
+            n: "報到開放時間（開始前幾分鐘）",
+            v: 10,
+            u: "分鐘",
+          },
+          {
+            k: "checkin-close",
+            n: "報到截止時間（開始後幾分鐘）",
+            v: 15,
+            u: "分鐘",
+          },
+          { k: "noshow-window-days", n: "未到場統計天數", v: 30, u: "天" },
+          { k: "noshow-threshold", n: "未到場次數門檻", v: 3, u: "次" },
+          { k: "suspension-days", n: "暫停天數", v: 7, u: "天" },
+          { k: "reminder-lead", n: "開始前提醒時間", v: 30, u: "分鐘" },
+        ];
+        var log = [
+          {
+            t: "2026年11月5日（週四） 16:20",
+            who: "王管理",
+            n: "最遠可預約天數",
+            o: 14,
+            nv: 30,
+          },
+          {
+            t: "2026年11月5日（週四） 16:18",
+            who: "王管理",
+            n: "最遠可預約天數",
+            o: 30,
+            nv: 14,
+          },
+          {
+            t: "2026年10月20日（週二） 09:45",
+            who: "王管理",
+            n: "每人有效預約上限",
+            o: 3,
+            nv: 5,
+          },
+        ];
+        var moreLog = [
+            {
+              t: "2026年10月1日（週四） 10:00",
+              who: "王管理",
+              n: "暫停天數",
+              o: 14,
+              nv: 7,
+            },
+          ],
+          shown = false;
+        var editing = null;
+        var root = h("div", { tid: "admin-rules" });
+        main.appendChild(root);
+        root.appendChild(
+          P.header(
+            "規則管理",
+            "規則為全公司共用。調整只影響之後的新操作，既有預約不會改變。",
+          ),
+        );
+        var out = h("div");
+        root.appendChild(out);
+
+        function draw() {
+          out.innerHTML = "";
+          if (P.state === "loading") {
+            out.setAttribute("aria-busy", "true");
+            out.appendChild(P.skeleton(6, "admin-rules-loading"));
+            return;
+          }
+          out.removeAttribute("aria-busy");
+          if (P.state === "error") {
+            out.appendChild(
+              P.stateBox(
+                "error",
+                "admin-rules-error",
+                "無法載入規則",
+                "無法載入規則。請稍後按「重新載入」再試一次。",
+                [P.reloadBtn()],
+              ),
+            );
+            return;
+          }
+          var tbl = h(
+            "table",
+            { class: "tbl", tid: "admin-rules-list" },
+            h(
+              "thead",
+              null,
+              h(
+                "tr",
+                null,
+                ["規則", "目前值", "單位", "操作"].map(function (t) {
+                  return h("th", { scope: "col", text: t });
+                }),
+              ),
+            ),
+          );
+          var tb = h("tbody");
+          rules.forEach(function (r) {
+            var tr = h(
+              "tr",
+              { tid: "rule-row", "data-id": r.k },
+              h("td", { "data-label": "規則" }, h("strong", { text: r.n })),
+            );
+            if (editing === r.k) {
+              var inp = h("input", {
+                tid: "rule-input",
+                type: "text",
+                inputmode: "numeric",
+                value: r.v,
+                "aria-label": r.n,
+                style:
+                  "min-height:44px;width:100%;max-width:140px;padding:0 8px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:inherit",
+                id: "inp-" + r.k,
+              });
+              var err = h("div", {
+                class: "err",
+                tid: "rule-input-error",
+                id: "err-" + r.k,
+                role: "alert",
+                hidden: true,
+              });
+              var save = h("button", {
+                class: "btn primary sm",
+                tid: "rule-save",
+                text: "儲存",
+              });
+              save.addEventListener("click", function () {
+                var v = inp.value.trim();
+                if (!/^[1-9][0-9]*$/.test(v)) {
+                  err.hidden = false;
+                  err.textContent = "須為正整數。請輸入 1 以上的整數。";
+                  inp.setAttribute("aria-invalid", "true");
+                  inp.setAttribute("aria-describedby", err.id);
+                  inp.focus();
+                  return;
+                }
+                save.disabled = true;
+                save.textContent = "儲存中…";
+                setTimeout(function () {
+                  if (q.get("fail") === "1") {
+                    P.toast("無法儲存" + r.n + "。請稍後再試一次。", "error");
+                    save.disabled = false;
+                    save.textContent = "儲存";
+                    return;
+                  }
+                  log.unshift({
+                    t: "2026年11月7日（週六） 14:00",
+                    who: "王管理",
+                    n: r.n,
+                    o: r.v,
+                    nv: parseInt(v, 10),
+                  });
+                  r.v = parseInt(v, 10);
+                  editing = null;
+                  P.toast("已將" + r.n + "改為 " + r.v + r.u + "。");
+                  draw();
+                }, 400);
+              });
+              tr.appendChild(h("td", { "data-label": "目前值" }, inp, err));
+              tr.appendChild(h("td", { "data-label": "單位", text: r.u }));
+              tr.appendChild(
+                h(
+                  "td",
+                  { "data-label": "操作" },
+                  h(
+                    "div",
+                    { class: "row" },
+                    save,
+                    h("button", {
+                      class: "btn sm",
+                      tid: "rule-cancel",
+                      text: "取消",
+                      onclick: function () {
+                        editing = null;
+                        draw();
+                      },
+                    }),
+                  ),
+                ),
+              );
+            } else {
+              tr.appendChild(h("td", { "data-label": "目前值", text: r.v }));
+              tr.appendChild(h("td", { "data-label": "單位", text: r.u }));
+              tr.appendChild(
+                h(
+                  "td",
+                  { "data-label": "操作" },
+                  h("button", {
+                    class: "btn sm",
+                    tid: "rule-edit",
+                    text: "修改",
+                    onclick: function () {
+                      editing = r.k;
+                      draw();
+                      setTimeout(function () {
+                        var i = document.getElementById("inp-" + r.k);
+                        if (i) i.focus();
+                      }, 0);
+                    },
+                  }),
+                ),
+              );
+            }
+            tb.appendChild(tr);
+          });
+          tbl.appendChild(tb);
+          out.appendChild(tbl);
+
+          out.appendChild(h("h2", { text: "變更紀錄" }));
+          out.appendChild(
+            h("p", { class: "hint", text: "變更紀錄不可修改或刪除。" }),
+          );
+          var entries =
+            P.state === "empty" ? [] : shown ? log.concat(moreLog) : log;
+          if (!entries.length) {
+            out.appendChild(
+              P.stateBox("empty", "admin-rules-empty", "尚無變更紀錄。", ""),
+            );
+            return;
+          }
+          var ul = h("ul", { class: "list", tid: "rule-change-log" });
+          entries.forEach(function (l) {
+            ul.appendChild(
+              h("li", {
+                class: "item",
+                tid: "rule-change-log-item",
+                text:
+                  l.t + "｜" + l.who + "｜" + l.n + "：" + l.o + " → " + l.nv,
+              }),
+            );
+          });
+          out.appendChild(ul);
+          if (!shown)
+            out.appendChild(
+              h(
+                "div",
+                { class: "row", style: "margin-top:12px" },
+                h("button", {
+                  class: "btn",
+                  tid: "rule-change-log-load-more",
+                  text: "載入更多",
+                  onclick: function () {
+                    shown = true;
+                    draw();
+                  },
+                }),
+              ),
+            );
+        }
+        draw();
+      })();
+    </script>
+  </body>
+</html>

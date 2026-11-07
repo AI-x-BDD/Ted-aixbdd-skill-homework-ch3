@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>待審核</title>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("reviews.html", "reviewer");
+        if (!main) return;
+        var all = [
+          {
+            id: "r1",
+            who: "陳小明",
+            venue: "大會議室",
+            date: "2026-11-12",
+            s: "14:00",
+            e: "16:00",
+            subject: "客戶簡報",
+            n: 12,
+            for: "reviewer",
+          },
+          {
+            id: "r2",
+            who: "吳雅婷",
+            venue: "培訓教室",
+            date: "2026-11-17",
+            s: "13:00",
+            e: "17:00",
+            subject: "新人訓練課程",
+            n: 25,
+            for: "reviewer",
+            series: {
+              freq: "每週",
+              dates: ["2026-11-17", "2026-11-24", "2026-12-01", "2026-12-08"],
+            },
+          },
+          {
+            id: "r3",
+            who: "林審核",
+            venue: "培訓教室",
+            date: "2026-11-19",
+            s: "09:00",
+            e: "12:00",
+            subject: "審核者內部訓練",
+            n: 10,
+            for: "admin",
+            byAdmin: true,
+          },
+        ];
+        var items = all.filter(function (r) {
+          return r.for === (P.role === "admin" ? "admin" : "reviewer");
+        });
+        var root = h("div", { tid: "review-page" });
+        main.appendChild(root);
+        root.appendChild(P.header("待審核"));
+        var out = h("div");
+        root.appendChild(out);
+
+        function done(r, text) {
+          items = items.filter(function (x) {
+            return x !== r;
+          });
+          P.toast(text);
+          draw();
+        }
+        function race(r) {
+          items = items.filter(function (x) {
+            return x !== r;
+          });
+          P.toast("此申請已被處理。清單已更新。", "error");
+          draw();
+        }
+        function approve(r, btn) {
+          btn.disabled = true;
+          btn.textContent = "處理中…";
+          setTimeout(function () {
+            if (q.get("race") === "1") return race(r);
+            done(
+              r,
+              r.series
+                ? "已核准整批申請，共 " + r.series.dates.length + " 場。"
+                : "已核准，預約者會收到通知。",
+            );
+          }, 400);
+        }
+        var adlg = null,
+          rdlg = null;
+        function approveBatch(r, trigger) {
+          if (adlg) adlg.el.remove();
+          adlg = P.confirm(
+            "review-approve-dialog",
+            "要核准整批申請嗎？",
+            "核准後，未取消的 " +
+              r.series.dates.length +
+              " 個場次會一次變為已確認。",
+            "確定核准",
+            "先不要核准",
+            function () {
+              approve(r, {});
+            },
+            false,
+          );
+          adlg.open(trigger);
+        }
+        function reject(r, trigger) {
+          if (rdlg) rdlg.el.remove();
+          rdlg = P.dialog("review-reject-dialog", "駁回申請");
+          var ta = h("textarea", { tid: "review-reject-reason" });
+          rdlg.body.appendChild(
+            P.field("駁回原因（必填）", ta, null, "review-reject-reason-error"),
+          );
+          var ok = h("button", {
+            class: "btn danger",
+            tid: "review-reject-dialog-confirm",
+            text: "確定駁回",
+          });
+          ok.addEventListener("click", function () {
+            if (!ta.value.trim()) {
+              P.fieldErr(ta, "請填寫駁回原因。");
+              ta.focus();
+              return;
+            }
+            P.fieldErr(ta, "");
+            ok.disabled = true;
+            ok.textContent = "處理中…";
+            setTimeout(function () {
+              rdlg.close();
+              if (q.get("race") === "1") return race(r);
+              done(r, "已駁回，預約者會收到含原因的通知。");
+            }, 400);
+          });
+          rdlg.foot.appendChild(
+            h("button", {
+              class: "btn",
+              tid: "review-reject-dialog-cancel",
+              text: "取消",
+              onclick: function () {
+                rdlg.close();
+              },
+            }),
+          );
+          rdlg.foot.appendChild(ok);
+          rdlg.open(trigger);
+        }
+        function item(r) {
+          var li = h("li", {
+            class: "item",
+            tid: "review-item",
+            "data-id": r.id,
+            "aria-label":
+              r.who +
+              "的申請，" +
+              r.venue +
+              "，" +
+              P.fmtDate(r.date) +
+              " " +
+              r.s +
+              "–" +
+              r.e,
+          });
+          li.appendChild(
+            h(
+              "div",
+              { class: "top" },
+              h("span", { class: "title", text: r.who + " 申請" }),
+              r.series
+                ? h("span", { class: "tag accent", text: "整批週期性申請" })
+                : null,
+            ),
+          );
+          li.appendChild(
+            h("div", {
+              class: "meta",
+              text: r.venue + "，" + P.fmtDate(r.date) + " " + r.s + "–" + r.e,
+            }),
+          );
+          li.appendChild(
+            h("div", { class: "meta", text: r.subject + "，" + r.n + " 人" }),
+          );
+          if (r.byAdmin)
+            li.appendChild(
+              h("div", {
+                class: "tag warn",
+                style: "justify-self:start",
+                text: "此場地沒有其他審核者，由管理員審核",
+              }),
+            );
+          if (r.series) {
+            var d = r.series.dates;
+            li.appendChild(
+              h("div", {
+                class: "meta",
+                text:
+                  r.series.freq +
+                  "，共 " +
+                  d.length +
+                  " 場，" +
+                  P.fmtDate(d[0]) +
+                  " 至 " +
+                  P.fmtDate(d[d.length - 1]),
+              }),
+            );
+            var det = h("details");
+            det.appendChild(
+              h("summary", {
+                tid: "review-series-toggle",
+                style:
+                  "min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:600",
+                text: "查看全部場次",
+              }),
+            );
+            var ul = h("ul", { style: "margin:0 0 6px;padding-left:20px" });
+            d.forEach(function (x) {
+              ul.appendChild(
+                h("li", { text: P.fmtDate(x) + " " + r.s + "–" + r.e }),
+              );
+            });
+            det.appendChild(ul);
+            li.appendChild(det);
+          }
+          li.appendChild(
+            h(
+              "div",
+              { class: "row" },
+              h("button", {
+                class: "btn primary sm",
+                tid: "review-approve-button",
+                text: r.series ? "核准整批" : "核准",
+                onclick: function (e) {
+                  if (r.series) approveBatch(r, e.target);
+                  else approve(r, e.target);
+                },
+              }),
+              h("button", {
+                class: "btn sm",
+                tid: "review-reject-button",
+                text: "駁回",
+                onclick: function (e) {
+                  reject(r, e.target);
+                },
+              }),
+            ),
+          );
+          return li;
+        }
+        function draw() {
+          out.innerHTML = "";
+          if (P.state === "loading") {
+            out.setAttribute("aria-busy", "true");
+            out.appendChild(P.skeleton(3, "review-page-loading"));
+            return;
+          }
+          out.removeAttribute("aria-busy");
+          if (P.state === "error") {
+            out.appendChild(
+              P.stateBox(
+                "error",
+                "review-page-error",
+                "無法載入待審核清單",
+                "無法載入待審核清單。請稍後按「重新載入」再試一次。",
+                [P.reloadBtn()],
+              ),
+            );
+            return;
+          }
+          var list = P.state === "empty" ? [] : items;
+          if (!list.length) {
+            out.appendChild(
+              P.stateBox(
+                "empty",
+                "review-page-empty",
+                "目前沒有待審核的申請",
+                "",
+              ),
+            );
+            return;
+          }
+          var ul = h("ul", { class: "list", tid: "review-list" });
+          list.forEach(function (r) {
+            ul.appendChild(item(r));
+          });
+          out.appendChild(ul);
+        }
+        draw();
+      })();
+    </script>
+  </body>
+</html>

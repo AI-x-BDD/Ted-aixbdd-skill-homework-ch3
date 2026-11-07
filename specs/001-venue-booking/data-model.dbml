@@ -1,0 +1,396 @@
+Project venue_booking {
+  Note: '''
+    # 資料模型：場地／會議室預約系統
+
+    **功能分支**：`001-venue-booking`
+
+    資料庫為 MySQL 8.4 LTS（InnoDB、utf8mb4）。所有表示時間點的欄位為 `DATETIME(3)`，存 UTC，欄位名一律以 `_at` 結尾，欄位 note 標明 UTC（C-SH-02）；不是時間點的欄位（venue_opening_hours.open_minute、close_minute 為台北時區基準的分鐘數，booking_series.start_time、end_time 為台北當地時分）不在此限，其 note 標明單位與時區基準；連線設定 `time_zone = '+00:00'`，程式與 SQL 不使用 `NOW()`，目前時間一律以參數帶入（R-06）。主鍵除特別註明外為 `BIGINT AUTO_INCREMENT`。
+
+    ## 交易邊界
+
+    所有交易使用預設的 REPEATABLE READ；遇死結（ER_LOCK_DEADLOCK）或鎖逾時，整個交易以隨機 20 到 100 毫秒間隔重試最多 3 次，仍失敗回 409。本功能沒有檔案系統寫入，不需處理檔案與交易的先後。
+
+    | 交易 | 範圍 | 失敗處理 |
+    |---|---|---|
+    | 登入 | 插入 sessions | 回滾，不發出 sid |
+    | 變更密碼／重設密碼 | 更新 users.password_hash 與 must_change_password，刪除該帳號全部 sessions | 整筆回滾，密碼與階段維持原狀 |
+    | 建立帳號 | 插入 users 與 user_roles | email 唯一鍵衝突（ER_DUP_ENTRY）整筆回滾，回 409「此 Email 已被使用」 |
+    | 編輯帳號 | 更新 users.name、取代 user_roles；移除 reviewer 角色時同交易刪除該帳號的 venue_reviewers 列 | 整筆回滾；服務層先鎖 users 列再檢查「不得移除最後一位啟用中管理員」 |
+    | 建立／編輯場地 | 插入或更新 venues，取代 venue_opening_hours 與 venue_reviewers | 整筆回滾，場地、開放時段、審核者維持原狀；名稱唯一鍵衝突回 409 |
+    | 建立單次預約 | 鎖 users 列（檢查 suspended_until_at、持有筆數）、插入 bookings、單一多列 INSERT 依 slot_start_at 由小到大寫入 booking_slots、插入 booking_events（from_status 為 NULL）、插入 notifications | booking_slots 主鍵重複則整筆回滾，不留下預約列，回 409「該時段已被占用」 |
+    | 修改預約（只改主題或人數） | 只更新 bookings 的 subject、attendees | 單一語句，失敗無殘留；不動 booking_slots 與狀態 |
+    | 修改預約（改時間或場地） | 刪除自己的 booking_slots 列、插入新列、更新 bookings、必要時狀態轉換並插入 booking_events、清空 reminder_sent_at 並更新 confirmed_at、對釋出範圍執行候補遞補掛勾、插入 notifications | 新時段主鍵重複則整筆回滾，原 booking_slots 列、bookings 內容與狀態恢復原狀（NFR-003） |
+    | 取消預約（single） | 條件更新 bookings.status 並設定 late_cancel、刪除 booking_slots 列、插入 booking_events、候補遞補掛勾 | 整筆回滾 |
+    | 取消預約（following） | 同上，對同批所有符合條件的場次在同一交易內逐場處理；整批全部取消時更新 booking_series.status（改為 cancelled） | 任一場次失敗則整筆回滾，不出現只取消一部分的結果 |
+    | 管理員取消單筆預約 | 條件更新 bookings、刪除 booking_slots、插入 booking_events（actor_type = admin，帶原因）、候補遞補掛勾、插入 notifications；若為週期性場次，依鎖定順序先鎖 booking_series 列，取消後該批已無未取消場次時，同交易將 booking_series.status 改為 cancelled | 整筆回滾，場次、時段、紀錄與批次狀態一起維持原狀，不出現場次已取消但批次仍為 confirmed 或 pending 的結果 |
+    | 單筆審核（核准／駁回） | 條件更新 bookings.status（WHERE status = 待審核），核准設定 confirmed_at 並清空 reminder_sent_at，駁回刪除 booking_slots 並執行掛勾，插入 booking_events 與 notifications | 條件更新影響 0 列時回滾並回 409「此申請已被處理」 |
+    | 整批審核（核准／駁回） | 對該批所有未取消場次逐一條件更新，更新 booking_series.status，駁回時刪除全部 booking_slots 並執行掛勾，插入 booking_events 與 notifications | 任一場次條件更新失敗則整批回滾 |
+    | 建立週期性預約 | 鎖 users 列、檢查持有筆數與批數、插入 booking_series、逐場嘗試寫入 booking_slots（重複鍵只回滾該語句，交易繼續以蒐集全部衝突）、全部成功才插入 bookings、booking_events、notifications | 只要有任何場次衝突，整個交易回滾，不留下批次或任何場次（NFR-004），回 409 與最新衝突清單 |
+    | 確認候補遞補 | 鎖 users 列、檢查候補仍為 offered 且未逾時、插入 bookings、將 booking_slots 的 hold 列原地改為 booking、更新 waitlist_entries（status = confirmed、booking_id）、插入 booking_events 與 notifications | 成功路徑整筆回滾即恢復為 offered 與 hold。持有上限、暫停或逾時造成的失效是獨立先提交的小交易：把候補改為 expired、刪除 hold 列、執行掛勾後提交，再回 409，失效不隨回應回滾 |
+    | 放棄候補 | 更新 waitlist_entries（expired、declined）、刪除 hold 列、掛勾、插入 notifications | 整筆回滾，候補維持 offered |
+    | 登記候補／取消候補 | 插入或更新單一 waitlist_entries 列 | 單一語句；重複登記由 uk_waitlist_active_dup 擋下（ER_DUP_ENTRY 回 409） |
+    | 設定維護時段（建立／編輯） | 重算受影響預約並與 bookingIds 比對，取消這些預約（更新 bookings、刪除 booking_slots、插入 booking_events、notifications），編輯時刪除舊維護 booking_slots，寫入 venue_maintenance_windows 與 holder_type = maintenance 的 booking_slots，並使被占用範圍內的候補保留依規則處理 | 任一步失敗全部回滾；維護時段 booking_slots 主鍵重複代表仍有未列入確認清單的占用，回滾並回 409 與最新影響 |
+    | 刪除維護時段 | 刪除 venue_maintenance_windows 與其 booking_slots 列、執行掛勾、插入 notifications | 整筆回滾，維護時段與占用維持原狀 |
+    | 停用場地 | 重算受影響預約並比對，逐筆取消（bookings、booking_slots、booking_events、notifications），將該場地 waiting 與 offered 候補改為 expired（venue_disabled）並刪除 hold 列，更新 venues.is_active | 整筆回滾，場地維持啟用且預約不變 |
+    | 停用帳號 | 鎖 users 列、重算受影響預約並比對，逐筆取消，使該帳號候補失效並刪除 hold 列，更新 users.is_active，刪除 sessions | 整筆回滾，帳號維持啟用 |
+    | 標記通知已讀 | 單一條件更新 notifications.read_at（WHERE user_id 與 read_at IS NULL） | 單一語句，無殘留 |
+    | 修改規則 | 更新 rules 並插入 rule_changes | 整筆回滾，規則值與變更紀錄一起不變 |
+    | 排程：逾期未審核 | 每個單次預約或每一批各自一個交易：SELECT ... FOR UPDATE SKIP LOCKED 取到期列，條件更新狀態、更新 booking_series.status、刪除 booking_slots、插入 booking_events（actor_type = system）、掛勾、notifications | 單筆失敗只回滾該筆並記錄日誌，下一輪重新掃描補做 |
+    | 排程：未到場判定 | 每筆預約一個交易：鎖 users 列、條件更新為 no_show、刪除判定時間之後的 booking_slots、插入 booking_events、統計窗內 no_show 次數、達門檻時更新 users.suspended_until_at 與 no_show_counted_from_at、掛勾、插入 notifications（含暫停通知） | 單筆整筆回滾，下一輪補做 |
+    | 排程：完成、開始前提醒、候補逾時與失效、遞補保險、清理 | 每筆（或每筆候補）一個交易：更新單一預約或候補、對應的 booking_events、booking_slots、notifications；清理為單一 DELETE 取 slot_start_at 早於一天前的列 | 單筆失敗回滾並記錄日誌，狀態導向的查詢使下一輪重做不會重複處理 |
+
+    ## 鎖定順序
+
+    凡會增加持有筆數或批數的交易，第一個鎖是使用者列（`SELECT ... FROM users WHERE id = ? FOR UPDATE`）。全部交易遵守同一順序：users 列、booking_series 列、bookings 列（id 由小到大）、waitlist_entries 列（id 由小到大）、booking_slots 列（venue_id、slot_start_at 由小到大）。釋出時段前，服務層應先鎖定會被候補遞補掛勾處理的 waitlist_entries 候選列，避免與掛勾的鎖定順序相反；仍發生的死結由重試處理。排程的到期列一律 `ORDER BY` 到期時間 `LIMIT 100 FOR UPDATE SKIP LOCKED`。
+
+    ## 時段占用如何由資料庫保證不重疊
+
+    有效預約（pending、confirmed、checked_in）、候補保留（hold）與維護時段（maintenance）各自占用其涵蓋的每個 30 分鐘 booking_slots 列，PRIMARY KEY (venue_id, slot_start_at) 使任何程式路徑都無法讓同一場地同一時段出現兩個占用者。釋出一律刪除列（不標記失效），已完成預約的列保留到清理工作刪除，所以主鍵只代表目前（或剛結束）的占用。
+
+    ## 不可更動資料表（資料庫層強制）
+
+    booking_events 與 rule_changes 各建立兩個觸發器，訊息一律為「紀錄不可修改」：
+
+    ```sql
+    CREATE TRIGGER trg_booking_events_no_update BEFORE UPDATE ON booking_events
+      FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '紀錄不可修改';
+    CREATE TRIGGER trg_booking_events_no_delete BEFORE DELETE ON booking_events
+      FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '紀錄不可修改';
+    CREATE TRIGGER trg_rule_changes_no_update BEFORE UPDATE ON rule_changes
+      FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '紀錄不可修改';
+    CREATE TRIGGER trg_rule_changes_no_delete BEFORE DELETE ON rule_changes
+      FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '紀錄不可修改';
+    ```
+
+    MySQL 的外鍵連鎖動作（CASCADE、SET NULL）不會觸發觸發器，所以指向這兩張表的父表之外鍵一律使用 restrict，且 booking_events、rule_changes 不得被任何外鍵設為連鎖刪除或連鎖更新。TRUNCATE 與 DROP 不觸發 DELETE 觸發器，應用程式連線的資料庫帳號不得授予 DROP、TRUNCATE、ALTER 與 TRIGGER 權限；該帳號對這兩張表只授予 SELECT、INSERT。
+
+    ## 資料庫層檢查約束（遷移以 CHECK 實作，MySQL 8.4 會強制執行）
+
+    - user_roles.role 只能是 reviewer 或 admin（employee 為所有帳號隱含，不存列）。
+    - venues：capacity >= 1；venue_opening_hours：weekday 介於 0 到 6、open_minute 與 close_minute 為 30 的倍數、0 <= open_minute < close_minute <= 1440。
+    - bookings：status 只能是 pending、confirmed、checked_in、completed、rejected、cancelled、no_show；end_at > start_at；attendees >= 1。
+    - booking_slots：holder_type 只能是 booking、hold、maintenance；slot_start_at 的分鐘為 0 或 30 且秒與毫秒為 0。
+    - booking_events：actor_type 只能是 user、reviewer、admin、system；to_status 同 bookings.status 的七個值；from_status 為 NULL 或同七個值之一；reason 對 rejected 的轉換由服務層檢查非空白。
+    - booking_series：frequency 只能是 weekly、biweekly；status 只能是 pending、confirmed、rejected、cancelled，預設值為 pending，代碼與 openapi.yaml 的 SeriesStatus 逐字相同（C-SH-01）。
+    - waitlist_entries：status 只能是 waiting、offered、confirmed、expired、cancelled；close_reason 為 NULL 或 offer_timeout、confirm_failed、declined、venue_disabled、account_disabled、started、cancelled。
+    - notifications.type 只能是 booking_created、review_result、waitlist_offer、booking_cancelled、review_pending、booking_changed、suspension、waitlist_expired、reminder。
+    - rules：int_value >= 1；rule_key 只能是下方 14 個鍵。
+
+    ## 規則預設值（遷移寫入 rules，時間類一律以分鐘儲存）
+
+    | rule_key | 單位 | 預設值 |
+    |---|---|---|
+    | max_duration_minutes | 分鐘 | 240 |
+    | max_advance_days | 天 | 30 |
+    | max_active_bookings | 筆 | 5 |
+    | max_active_series | 批 | 2 |
+    | max_series_months | 月 | 3 |
+    | late_cancel_minutes | 分鐘 | 60 |
+    | waitlist_confirm_minutes | 分鐘 | 30 |
+    | waitlist_cutoff_minutes | 分鐘 | 60 |
+    | checkin_open_minutes | 分鐘 | 10 |
+    | checkin_close_minutes | 分鐘 | 15 |
+    | no_show_window_days | 天 | 30 |
+    | no_show_threshold | 次 | 3 |
+    | suspend_days | 天 | 7 |
+    | reminder_minutes | 分鐘 | 30 |
+
+    預設列的 updated_by 為 NULL，updated_at 為遷移執行時間。
+
+    ## 遷移順序
+
+    依外鍵相依由父到子，每個檔案可獨立重複驗證：
+
+    1. users、user_roles、sessions
+    2. venues、venue_opening_hours、venue_reviewers、venue_maintenance_windows
+    3. rules（含 14 列預設值）、rule_changes（含兩個不可更動觸發器與權限）
+    4. booking_series、bookings
+    5. booking_slots
+    6. booking_events（含兩個不可更動觸發器與權限）
+    7. waitlist_entries（含 active_dup_key 產生欄位與唯一鍵）、並補上 bookings 與 waitlist_entries 之間的外鍵
+    8. notifications
+    9. 所有 CHECK 約束（可與各表一起建立）
+
+    第一位管理員不在遷移內，由 `bootstrap-admin` 指令建立。
+
+    ## 外鍵與刪除政策
+
+    所有 Ref 均為 restrict：本系統不物理刪除 users、venues、bookings、booking_series、waitlist_entries。會物理刪除的只有 sessions、venue_opening_hours、venue_reviewers、venue_maintenance_windows、booking_slots，它們是被參照的最末端，或其父表不會被刪除。booking_slots.holder_id 依 holder_type 指向 bookings、waitlist_entries 或 venue_maintenance_windows，是多型參照，無法以單一外鍵表達，由服務層與交易保證。
+  '''
+}
+
+Table users {
+  id bigint [pk, increment, note: '帳號識別']
+  email varchar(254) [not null, note: '登入 Email；寫入與比對前一律去除首尾空白並轉小寫；欄位定序使用 utf8mb4_bin，使不同大小寫或重音符號不被視為同一個信箱']
+  name varchar(100) [not null, note: '姓名']
+  password_hash varchar(255) [not null, note: 'scrypt 雜湊字串（參數、鹽、雜湊），沒有可還原的密碼；任何查詢結果都不回傳此欄']
+  is_active tinyint [not null, default: 1, note: '1 啟用，0 已停用；停用後不得登入']
+  must_change_password tinyint [not null, default: 0, note: '1 表示管理員重設密碼後須先自行改密碼；為 1 時除查詢自己、變更密碼、登出外一律拒絕']
+  suspended_until_at datetime(3) [null, default: null, note: '預約權限暫停到此時間（UTC）；NULL 或不大於目前時間表示未暫停；期滿不需排程，以目前時間比較']
+  no_show_counted_from_at datetime(3) [null, default: null, note: 'UTC；未到場累計的起算下限；達門檻暫停時設為 suspended_until_at，使暫停期間發生的未到場不延長暫停；NULL 表示不設下限']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；建立時間']
+
+  indexes {
+    email [unique, name: 'uk_users_email', note: '供登入查詢與 Email 全系統唯一（FR-001）']
+  }
+
+  Note: '保存帳號、停用狀態、密碼雜湊、須改密碼旗標、預約權限暫停與未到場累計起點。'
+}
+
+Table user_roles {
+  user_id bigint [not null, note: '帳號']
+  role varchar(16) [not null, note: '角色，reviewer 或 admin；employee 為所有帳號隱含，不存列']
+
+  indexes {
+    (user_id, role) [pk, name: 'pk_user_roles', note: '一個帳號可有多個角色；供依帳號載入角色與依 role 篩選時掃描（帳號上限 200）']
+  }
+
+  Note: '保存帳號與角色的對應，一個帳號可同時具備多個角色。'
+}
+
+Table sessions {
+  id bigint [pk, increment, note: '階段識別']
+  token_hash char(64) [not null, note: '階段憑證的 SHA-256（十六進位），資料庫不存憑證本身']
+  user_id bigint [not null, note: '階段所屬帳號']
+  expires_at datetime(3) [not null, note: 'UTC；到期時間；閒置 12 小時過期，每次使用往後延長']
+
+  indexes {
+    token_hash [unique, name: 'uk_sessions_token_hash', note: '供每個請求依憑證雜湊查詢階段與登出刪除']
+    user_id [name: 'ix_sessions_user', note: '供停用帳號、重設密碼、變更密碼時刪除該帳號全部階段']
+  }
+
+  Note: '''
+    保存登入階段。每個需登入的操作都會讀取並延長 expires_at。
+    沒有任何背景工作清除已過期的列；過期列在讀取時被視為無效，建議登入時順便刪除該帳號已過期的階段（見資料庫端回報）。
+  '''
+}
+
+Table venues {
+  id bigint [pk, increment, note: '場地識別']
+  name varchar(100) [not null, note: '場地名稱，全系統唯一']
+  location varchar(200) [not null, note: '地點']
+  capacity int [not null, note: '容納人數，正整數（CHECK >= 1）']
+  equipment json [not null, default: `(JSON_ARRAY())`, note: '設備名稱字串陣列；搜尋時以 JSON_CONTAINS 判斷是否具備所有指定設備，equipmentOptions 由啟用場地的陣列合併取得']
+  requires_approval tinyint [not null, default: 0, note: '1 表示預約需審核']
+  is_active tinyint [not null, default: 1, note: '1 啟用，0 停用；停用場地不出現在搜尋與行事曆、不接受新預約']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；建立時間']
+
+  indexes {
+    name [unique, name: 'uk_venues_name', note: '供場地名稱唯一（FR-006）']
+  }
+
+  Note: '保存場地基本資料、是否需審核與啟用狀態；規模在 20 個以內，搜尋時全表掃描即可，故不另建其他索引。'
+}
+
+Table venue_opening_hours {
+  id bigint [pk, increment, note: '開放時段識別']
+  venue_id bigint [not null, note: '所屬場地']
+  weekday tinyint [not null, note: '星期，0 為週日、6 為週六（CHECK 0 到 6）']
+  open_minute smallint [not null, note: '單位為分鐘，台北時區基準的一天內開始分鐘數（0 為台北 00:00），不是時間點，30 的倍數']
+  close_minute smallint [not null, note: '單位為分鐘，台北時區基準的一天內結束分鐘數，不是時間點，30 的倍數，可為 1440 表示 24:00，須大於 open_minute']
+
+  indexes {
+    (venue_id, weekday, open_minute) [unique, name: 'uk_opening_hours_segment', note: '供預約與搜尋依場地與星期載入開放時段；同一星期各段起點不重複（段與段不得重疊由服務層驗證）']
+  }
+
+  Note: '保存場地依星期設定的開放時段，同一星期幾可有多段；updateVenue 以整組取代。'
+}
+
+Table venue_reviewers {
+  venue_id bigint [not null, note: '場地']
+  user_id bigint [not null, note: '被指派的審核者帳號']
+
+  indexes {
+    (venue_id, user_id) [pk, name: 'pk_venue_reviewers', note: '供依場地查審核者與判斷某帳號是否為該場地審核者']
+    user_id [name: 'ix_venue_reviewers_user', note: '供待審核清單依審核者查負責場地，以及移除 reviewer 角色時刪除該帳號全部指派']
+  }
+
+  Note: '保存場地與審核者的多對多指派；需審核的場地至少一位由服務層檢查。'
+}
+
+Table venue_maintenance_windows {
+  id bigint [pk, increment, note: '維護時段識別']
+  venue_id bigint [not null, note: '所屬場地']
+  start_at datetime(3) [not null, note: '開始時間（UTC），30 分鐘對齊']
+  end_at datetime(3) [not null, note: '結束時間（UTC），須晚於 start_at']
+
+  indexes {
+    (venue_id, start_at) [name: 'ix_maintenance_venue_start', note: '供維護時段列表依開始時間排序、影響預覽排除自己，以及報表扣除區間內維護時間']
+  }
+
+  Note: '保存場地的維護時段；占用時段本身另以 booking_slots（holder_type = maintenance）保證不與預約重疊。'
+}
+
+Table rules {
+  rule_key varchar(40) [pk, note: '規則鍵，共 14 個，見 Project Note 的規則預設值']
+  int_value int [not null, note: '規則值，正整數（CHECK >= 1）；時間類以分鐘儲存，API 以畫面單位收發並由伺服器換算']
+  updated_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；最後修改時間；預設列為遷移時間']
+  updated_by bigint [null, default: null, note: '最後修改的管理員；預設列為 NULL']
+
+  Note: '保存全公司共用的規則數字；每個交易開始時整表（約 14 列）讀取一次作為快照，不快取。'
+}
+
+Table rule_changes {
+  id bigint [pk, increment, note: '變更紀錄識別']
+  rule_key varchar(40) [not null, note: '被修改的規則鍵']
+  actor_user_id bigint [not null, note: '操作的管理員']
+  changed_at datetime(3) [not null, note: 'UTC；變更時間']
+  old_value int [not null, note: '修改前的值（儲存單位）']
+  new_value int [not null, note: '修改後的值（儲存單位）']
+
+  indexes {
+    (changed_at, id) [name: 'ix_rule_changes_changed', note: '供變更紀錄由新到舊列出']
+  }
+
+  Note: '規則變更紀錄，不可更動：BEFORE UPDATE 與 BEFORE DELETE 觸發器拒絕任何修改與刪除（NFR-010）。'
+}
+
+Table booking_series {
+  id bigint [pk, increment, note: '批次識別']
+  user_id bigint [not null, note: '預約者']
+  venue_id bigint [not null, note: '場地']
+  frequency varchar(16) [not null, note: 'weekly 每週（間隔 7 天）或 biweekly 每兩週（間隔 14 天）']
+  first_date date [not null, note: '第一場的台北日期']
+  last_date date [not null, note: '最後一場的台北日期；修改單一場次日期時不得晚於此日']
+  start_time time [not null, note: '每場的台北當地開始時分（HH:mm），不是時間點，不含日期與時區換算，場次的 UTC 時間點存於 bookings.start_at']
+  end_time time [not null, note: '每場的台北當地結束時分（HH:mm），不是時間點，可為 24:00:00，場次的 UTC 時間點存於 bookings.end_at']
+  subject varchar(100) [not null, note: '主題']
+  attendees int [not null, note: '人數']
+  status varchar(16) [not null, default: 'pending', note: 'pending 待審核、confirmed 已確認（整批核准，或不需審核的場地直接成立）、rejected 已駁回、cancelled 已取消（逾期未審核或整批所有場次皆已取消）；代碼與 openapi.yaml 的 SeriesStatus 逐字相同（C-SH-01），整批核准後為 confirmed']
+  session_count int [not null, note: '建立時的場次數，略過衝突日期後的實際數量']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；建立時間']
+
+  Note: '保存一批週期性預約的設定與批次層級狀態；每個場次是 bookings 的一列，以 series_id 與 series_index 關聯。'
+}
+
+Table bookings {
+  id bigint [pk, increment, note: '預約識別']
+  user_id bigint [not null, note: '預約者']
+  venue_id bigint [not null, note: '場地']
+  start_at datetime(3) [not null, note: '開始時間（UTC）']
+  end_at datetime(3) [not null, note: '結束時間（UTC），須晚於 start_at']
+  subject varchar(100) [not null, note: '主題']
+  attendees int [not null, note: '人數，至少 1 且不超過場地容納人數（容納人數由服務層檢查）']
+  status varchar(16) [not null, note: 'pending、confirmed、checked_in、completed、rejected、cancelled、no_show；只能透過狀態轉換入口條件更新']
+  series_id bigint [null, default: null, note: '所屬週期性批次；單次預約為 NULL']
+  series_index int [null, default: null, note: '場次序號，從 1 起；單次預約為 NULL']
+  late_cancel tinyint [not null, default: 0, note: '1 表示預約者在門檻內取消的逾時取消；管理員取消與系統取消不設定']
+  confirmed_at datetime(3) [null, default: null, note: 'UTC；轉為 confirmed 的時間；修改時間或場地後重新確認時更新；待審核為 NULL']
+  reminder_sent_at datetime(3) [null, default: null, note: 'UTC；開始前提醒發送時間；NULL 表示尚未提醒；重新確認時清空']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；送出時間；待審核清單依此由舊到新']
+  updated_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；最後更新時間']
+
+  indexes {
+    (user_id, status, start_at) [name: 'ix_bookings_user_status_start', note: '供持有筆數與批數統計、我的預約分頁、未到場累計、停用帳號影響預覽與提醒對象查詢']
+    (venue_id, start_at, status) [name: 'ix_bookings_venue_start_status', note: '供場地停用與維護時段的影響預覽、報表依場地與開始時間區間取預約列']
+    (status, start_at) [name: 'ix_bookings_status_start', note: '供排程掃描逾期未審核、未到場、完成與開始前提醒，並供待審核清單']
+    start_at [name: 'ix_bookings_start', note: '供管理員全部預約依開始時間由新到舊並以日期區間篩選']
+    (series_id, series_index) [unique, name: 'uk_bookings_series_index', note: '供同批場次依序列出與取消其後場次；同批序號不重複']
+  }
+
+  Note: '保存單次預約與週期性預約的每個場次；占用時段另存於 booking_slots，狀態變更紀錄另存於 booking_events。'
+}
+
+Table booking_slots {
+  venue_id bigint [not null, note: '場地']
+  slot_start_at datetime(3) [not null, note: '30 分鐘時段的起點（UTC）；分鐘為 0 或 30、秒為 0']
+  holder_type varchar(16) [not null, note: 'booking 有效預約、hold 候補保留、maintenance 維護時段']
+  holder_id bigint [not null, note: '占用者識別；依 holder_type 為 bookings.id、waitlist_entries.id 或 venue_maintenance_windows.id']
+
+  indexes {
+    (venue_id, slot_start_at) [pk, name: 'pk_booking_slots', note: '由資料庫保證同一場地同一時段只有一個占用者，併發時重複鍵錯誤使後者失敗（NFR-008）；同時供搜尋與行事曆依場地與時間區間讀取']
+    (holder_type, holder_id) [name: 'ix_booking_slots_holder', note: '供依預約、候補或維護時段釋出其全部時段列，以及遞補確認時把 hold 原地改為 booking']
+    slot_start_at [name: 'ix_booking_slots_slot_start_at', note: '供清理工作刪除一天前的時段列']
+  }
+
+  Note: '''
+    保存預約、候補保留與維護時段占用的每個 30 分鐘時段列，是不重疊的唯一保證。
+    單次預約最長 4 小時（規則可放寬），故一筆預約至多數列；已完成預約的列保留到清理工作刪除；判定未到場時只刪除判定時間之後的列。
+  '''
+}
+
+Table booking_events {
+  id bigint [pk, increment, note: '操作紀錄識別']
+  booking_id bigint [not null, note: '被變更的預約']
+  actor_user_id bigint [null, default: null, note: '操作者帳號；系統自動處理時為 NULL']
+  actor_type varchar(16) [not null, note: 'user、reviewer、admin、system']
+  occurred_at datetime(3) [not null, note: '發生時間（UTC）']
+  from_status varchar(16) [null, default: null, note: '變更前狀態；建立預約的第一筆紀錄沒有前一個狀態，為 NULL']
+  to_status varchar(16) [not null, note: '變更後狀態']
+  reason varchar(500) [null, default: null, note: '原因；駁回、管理員取消與系統自動處理必填，其餘可為 NULL']
+
+  indexes {
+    (booking_id, occurred_at, id) [name: 'ix_booking_events_booking', note: '供依預約由舊到新列出操作紀錄、取消者類型與我的預約的駁回／取消原因查詢']
+  }
+
+  Note: '預約狀態變更紀錄，不可更動：BEFORE UPDATE 與 BEFORE DELETE 觸發器拒絕任何修改與刪除（NFR-010）；每次狀態變更與寫入紀錄在同一交易（SC-006）。'
+}
+
+Table waitlist_entries {
+  id bigint [pk, increment, note: '候補識別']
+  user_id bigint [not null, note: '登記者']
+  venue_id bigint [not null, note: '場地']
+  start_at datetime(3) [not null, note: '候補時段開始（UTC）']
+  end_at datetime(3) [not null, note: '候補時段結束（UTC）']
+  subject varchar(100) [not null, note: '主題']
+  attendees int [not null, note: '人數']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；登記時間；順位依 (created_at, id) 由小到大']
+  status varchar(16) [not null, note: 'waiting 等候中、offered 保留中、confirmed 已遞補成立、expired 失效、cancelled 已取消']
+  offer_expires_at datetime(3) [null, default: null, note: 'UTC；保留到期時間，僅 offered 時有值']
+  close_reason varchar(24) [null, default: null, note: '失效或結束原因：offer_timeout、confirm_failed、declined、venue_disabled、account_disabled、started、cancelled；waiting、offered、confirmed 為 NULL']
+  closed_at datetime(3) [null, default: null, note: 'UTC；失效、取消或遞補成立的時間']
+  booking_id bigint [null, default: null, note: '遞補成立後建立的預約；其他為 NULL']
+  active_dup_key tinyint [null, default: null, note: '資料庫產生的欄位（STORED GENERATED ALWAYS AS (IF(status IN waiting 或 offered, 1, NULL))），應用程式不得寫入；配合 uk_waitlist_active_dup 使同一人同場地同起訖只能有一筆等候中或保留中的候補（FR-060）']
+
+  indexes {
+    (venue_id, start_at, end_at, status, created_at) [name: 'ix_waitlist_slot', note: '供同場地同起訖的順位計算、釋出範圍內候補遞補掛勾與停用場地時使候補失效']
+    (user_id, status, created_at) [name: 'ix_waitlist_user_status', note: '供我的候補（等候中、保留中與最近失效）與停用帳號時使候補失效']
+    (status, offer_expires_at) [name: 'ix_waitlist_status_offer', note: '供排程找出保留已到期的候補']
+    (status, start_at) [name: 'ix_waitlist_status_start', note: '供排程找出候補時段已開始而失效，以及每輪對等候中候補重跑遞補掛勾']
+    (user_id, venue_id, start_at, end_at, active_dup_key) [unique, name: 'uk_waitlist_active_dup', note: '同一人同場地同起訖的重複候補由資料庫擋下；active_dup_key 為 NULL 的列不受限制']
+  }
+
+  Note: '保存候補登記、順位依據、保留期限與失效原因；候補不計入持有筆數，且與 bookings 是不同的表。'
+}
+
+Table notifications {
+  id bigint [pk, increment, note: '通知識別']
+  user_id bigint [not null, note: '通知的對象，使用者只能看到發給自己的通知']
+  type varchar(24) [not null, note: 'booking_created、review_result、waitlist_offer、booking_cancelled、review_pending、booking_changed、suspension、waitlist_expired、reminder']
+  message varchar(1000) [not null, note: '事件發生當下組成的繁體中文內容，時間為台北時間']
+  booking_id bigint [null, default: null, note: '關聯的預約；與預約無關的通知為 NULL']
+  waitlist_entry_id bigint [null, default: null, note: '關聯的候補；與候補無關的通知為 NULL']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；發送時間']
+  read_at datetime(3) [null, default: null, note: 'UTC；已讀時間；NULL 表示未讀；已讀後再次標記不改變']
+
+  indexes {
+    (user_id, created_at, id) [name: 'ix_notifications_user_created', note: '供通知列表依 (created_at, id) 由新到舊分頁']
+    (user_id, read_at) [name: 'ix_notifications_user_read', note: '供導覽列每 30 秒輪詢的未讀數計算']
+  }
+
+  Note: '保存站內通知，與產生事件在同一交易寫入。'
+}
+
+Ref fk_user_roles_user_id: user_roles.user_id > users.id [delete: restrict]
+Ref fk_sessions_user_id: sessions.user_id > users.id [delete: restrict]
+Ref fk_opening_hours_venue_id: venue_opening_hours.venue_id > venues.id [delete: restrict]
+Ref fk_venue_reviewers_venue_id: venue_reviewers.venue_id > venues.id [delete: restrict]
+Ref fk_venue_reviewers_user_id: venue_reviewers.user_id > users.id [delete: restrict]
+Ref fk_maintenance_venue_id: venue_maintenance_windows.venue_id > venues.id [delete: restrict]
+Ref fk_rules_updated_by: rules.updated_by > users.id [delete: restrict]
+Ref fk_rule_changes_rule_key: rule_changes.rule_key > rules.rule_key [delete: restrict]
+Ref fk_rule_changes_actor_user_id: rule_changes.actor_user_id > users.id [delete: restrict]
+Ref fk_series_user_id: booking_series.user_id > users.id [delete: restrict]
+Ref fk_series_venue_id: booking_series.venue_id > venues.id [delete: restrict]
+Ref fk_bookings_user_id: bookings.user_id > users.id [delete: restrict]
+Ref fk_bookings_venue_id: bookings.venue_id > venues.id [delete: restrict]
+Ref fk_bookings_series_id: bookings.series_id > booking_series.id [delete: restrict]
+Ref fk_booking_slots_venue_id: booking_slots.venue_id > venues.id [delete: restrict]
+Ref fk_booking_events_booking_id: booking_events.booking_id > bookings.id [delete: restrict]
+Ref fk_booking_events_actor_user_id: booking_events.actor_user_id > users.id [delete: restrict]
+Ref fk_waitlist_user_id: waitlist_entries.user_id > users.id [delete: restrict]
+Ref fk_waitlist_venue_id: waitlist_entries.venue_id > venues.id [delete: restrict]
+Ref fk_waitlist_booking_id: waitlist_entries.booking_id > bookings.id [delete: restrict]
+Ref fk_notifications_user_id: notifications.user_id > users.id [delete: restrict]
+Ref fk_notifications_booking_id: notifications.booking_id > bookings.id [delete: restrict]
+Ref fk_notifications_waitlist_entry_id: notifications.waitlist_entry_id > waitlist_entries.id [delete: restrict]

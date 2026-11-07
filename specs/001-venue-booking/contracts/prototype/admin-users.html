@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>帳號管理</title>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script src="impact.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("admin-users.html", "admin");
+        if (!main) return;
+        var users = [
+          {
+            id: "u1",
+            name: "王管理",
+            email: "wang@example.com",
+            roles: ["員工", "管理員"],
+            active: true,
+          },
+          {
+            id: "u2",
+            name: "林審核",
+            email: "lin@example.com",
+            roles: ["員工", "審核者"],
+            active: true,
+          },
+          {
+            id: "u3",
+            name: "陳小明",
+            email: "chen@example.com",
+            roles: ["員工"],
+            active: true,
+            suspended: "2026年11月14日（週六） 10:30",
+          },
+          {
+            id: "u4",
+            name: "吳雅婷",
+            email: "wu@example.com",
+            roles: ["員工"],
+            active: true,
+            mustChange: true,
+          },
+          {
+            id: "u5",
+            name: "黃審核",
+            email: "huang@example.com",
+            roles: ["員工", "審核者"],
+            active: true,
+          },
+          {
+            id: "u6",
+            name: "李離職",
+            email: "li@example.com",
+            roles: ["員工"],
+            active: false,
+          },
+        ];
+        var ROLE = {
+          員工: "一般員工",
+          審核者: "場地審核者",
+          管理員: "系統管理員",
+        };
+        var IMPACT = {
+          u3: [
+            "201 會議室，2026年11月9日（週一） 10:00–11:00，已確認",
+            "大會議室，2026年11月12日（週四） 14:00–16:00，待審核",
+          ],
+          u4: ["培訓教室，2026年11月17日（週二） 13:00–17:00，待審核"],
+        };
+        var root = h("div", { tid: "admin-users" });
+        main.appendChild(root);
+        root.appendChild(
+          h(
+            "div",
+            { class: "row", style: "justify-content:space-between" },
+            P.header("帳號管理"),
+            h("button", {
+              class: "btn primary",
+              tid: "user-add",
+              text: "建立帳號",
+              onclick: function (e) {
+                openForm(null, e.target);
+              },
+            }),
+          ),
+        );
+        var search = h("input", {
+          type: "search",
+          tid: "admin-users-search",
+          oninput: function () {
+            draw();
+          },
+        });
+        root.appendChild(P.field("搜尋姓名或 Email", search));
+        var out = h("div");
+        root.appendChild(out);
+
+        function draw() {
+          out.innerHTML = "";
+          if (P.state === "loading") {
+            out.setAttribute("aria-busy", "true");
+            out.appendChild(P.skeleton(5, "admin-users-loading"));
+            return;
+          }
+          out.removeAttribute("aria-busy");
+          if (P.state === "error") {
+            out.appendChild(
+              P.stateBox(
+                "error",
+                "admin-users-error",
+                "無法載入帳號資料",
+                "無法載入帳號資料。請稍後按「重新載入」再試一次。",
+                [P.reloadBtn()],
+              ),
+            );
+            return;
+          }
+          var kw = search.value.trim().toLowerCase();
+          var list =
+            P.state === "empty"
+              ? []
+              : users.filter(function (u) {
+                  return (
+                    !kw ||
+                    u.name.toLowerCase().indexOf(kw) >= 0 ||
+                    u.email.toLowerCase().indexOf(kw) >= 0
+                  );
+                });
+          if (!list.length) {
+            out.appendChild(
+              P.stateBox("empty", "admin-users-empty", "沒有符合的帳號。", ""),
+            );
+            return;
+          }
+          var tbl = h(
+            "table",
+            { class: "tbl", tid: "admin-users-list" },
+            h(
+              "thead",
+              null,
+              h(
+                "tr",
+                null,
+                ["姓名", "Email", "角色", "狀態", "操作"].map(function (t) {
+                  return h("th", { scope: "col", text: t });
+                }),
+              ),
+            ),
+          );
+          var tb = h("tbody");
+          list.forEach(function (u) {
+            var st = h(
+              "span",
+              null,
+              h("span", {
+                class: "tag " + (u.active ? "ok" : "danger"),
+                text: u.active ? "啟用中" : "已停用",
+              }),
+            );
+            if (u.mustChange) {
+              st.appendChild(document.createTextNode(" "));
+              st.appendChild(
+                h("span", { class: "tag warn", text: "待改密碼" }),
+              );
+            }
+            if (u.suspended) {
+              st.appendChild(document.createTextNode(" "));
+              st.appendChild(
+                h("span", {
+                  class: "tag warn",
+                  text: "預約權限暫停至 " + u.suspended,
+                }),
+              );
+            }
+            tb.appendChild(
+              h(
+                "tr",
+                {
+                  tid: "admin-users-item",
+                  "data-id": u.id,
+                  style: u.active ? "" : "opacity:.65",
+                },
+                h(
+                  "td",
+                  { "data-label": "姓名" },
+                  h("strong", { text: u.name }),
+                ),
+                h("td", { "data-label": "Email", text: u.email }),
+                h("td", {
+                  "data-label": "角色",
+                  text: u.roles
+                    .map(function (r) {
+                      return ROLE[r];
+                    })
+                    .join("、"),
+                }),
+                h("td", { "data-label": "狀態" }, st),
+                h(
+                  "td",
+                  { "data-label": "操作" },
+                  h(
+                    "div",
+                    { class: "row" },
+                    h("button", {
+                      class: "btn sm",
+                      tid: "user-edit",
+                      text: "編輯",
+                      onclick: function (e) {
+                        openForm(u, e.target);
+                      },
+                    }),
+                    h("button", {
+                      class: "btn sm",
+                      tid: "user-reset-password-button",
+                      text: "重設密碼",
+                      onclick: function (e) {
+                        resetPw(u, e.target);
+                      },
+                    }),
+                    u.active
+                      ? h("button", {
+                          class: "btn sm",
+                          tid: "user-disable-button",
+                          text: "停用",
+                          onclick: function (e) {
+                            disable(u, e.target);
+                          },
+                        })
+                      : h("button", {
+                          class: "btn sm",
+                          tid: "user-enable-button",
+                          text: "重新啟用",
+                          onclick: function () {
+                            u.active = true;
+                            P.toast("帳號已重新啟用。");
+                            draw();
+                          },
+                        }),
+                  ),
+                ),
+              ),
+            );
+          });
+          tbl.appendChild(tb);
+          out.appendChild(tbl);
+        }
+
+        var fdlg = null;
+        function openForm(u, trigger) {
+          if (fdlg) fdlg.el.remove();
+          fdlg = P.dialog("user-form-dialog", u ? "編輯帳號" : "建立帳號");
+          var f = {
+            email: h("input", {
+              tid: "user-email",
+              type: "email",
+              value: u ? u.email : "",
+              disabled: !!u,
+              autocomplete: "off",
+            }),
+            name: h("input", {
+              tid: "user-name",
+              type: "text",
+              value: u ? u.name : "",
+            }),
+            pw: h("input", {
+              tid: "user-password",
+              type: "password",
+              autocomplete: "new-password",
+            }),
+          };
+          var form = h("form", { novalidate: true, id: "uform" });
+          form.appendChild(P.field("Email", f.email, null, "user-email-error"));
+          form.appendChild(P.field("姓名", f.name, null, "user-name-error"));
+          if (!u)
+            form.appendChild(
+              P.field(
+                "初始密碼",
+                f.pw,
+                "長度須為 8 到 128 個字元。送出後不會再顯示。",
+                "user-password-error",
+              ),
+            );
+          var roles = h("div", {
+            class: "checks",
+            tid: "user-roles",
+            role: "group",
+            "aria-label": "角色",
+          });
+          roles.appendChild(
+            h(
+              "label",
+              null,
+              h("input", { type: "checkbox", checked: true, disabled: true }),
+              "一般員工",
+            ),
+          );
+          roles.appendChild(
+            h(
+              "label",
+              null,
+              h("input", {
+                type: "checkbox",
+                value: "審核者",
+                checked: u && u.roles.indexOf("審核者") >= 0,
+              }),
+              "場地審核者",
+            ),
+          );
+          roles.appendChild(
+            h(
+              "label",
+              null,
+              h("input", {
+                type: "checkbox",
+                value: "管理員",
+                checked: u && u.roles.indexOf("管理員") >= 0,
+              }),
+              "系統管理員",
+            ),
+          );
+          form.appendChild(
+            h(
+              "div",
+              { class: "field" },
+              h("span", { class: "lbl", text: "角色" }),
+              roles,
+              h("span", {
+                class: "hint",
+                text: "所有帳號都具備一般員工的權限。",
+              }),
+            ),
+          );
+          fdlg.body.appendChild(form);
+          var save = h("button", {
+            class: "btn primary",
+            type: "submit",
+            form: "uform",
+            tid: "user-save",
+            text: u ? "儲存" : "建立帳號",
+          });
+          fdlg.foot.appendChild(
+            h("button", {
+              class: "btn",
+              type: "button",
+              tid: "user-form-dialog-cancel",
+              text: "取消",
+              onclick: function () {
+                fdlg.close();
+              },
+            }),
+          );
+          fdlg.foot.appendChild(save);
+          form.addEventListener("submit", function (e) {
+            e.preventDefault();
+            var ok = true,
+              em = f.email.value.trim().toLowerCase();
+            if (!u) {
+              if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) {
+                P.fieldErr(f.email, "請輸入有效的 Email。");
+                ok = false;
+              } else if (
+                users.some(function (x) {
+                  return x.email === em;
+                })
+              ) {
+                P.fieldErr(f.email, "此 Email 已被使用。請改用其他 Email。");
+                ok = false;
+              } else P.fieldErr(f.email, "");
+              var l = f.pw.value.length;
+              if (l < 8 || l > 128) {
+                P.fieldErr(f.pw, "密碼長度須為 8 到 128 個字元。請重新輸入。");
+                ok = false;
+              } else P.fieldErr(f.pw, "");
+            }
+            if (!f.name.value.trim()) {
+              P.fieldErr(f.name, "請輸入姓名。");
+              ok = false;
+            } else P.fieldErr(f.name, "");
+            if (!ok) return;
+            save.disabled = true;
+            save.textContent = "儲存中…";
+            setTimeout(function () {
+              var rs = ["員工"].concat(
+                [].slice
+                  .call(roles.querySelectorAll("input[value]:checked"))
+                  .map(function (i) {
+                    return i.value;
+                  }),
+              );
+              if (u) {
+                u.name = f.name.value.trim();
+                u.roles = rs;
+              } else
+                users.push({
+                  id: "u" + (users.length + 1),
+                  name: f.name.value.trim(),
+                  email: em,
+                  roles: rs,
+                  active: true,
+                });
+              fdlg.close();
+              P.toast(u ? "帳號已更新。" : "帳號已建立。");
+              draw();
+            }, 500);
+          });
+          fdlg.open(trigger);
+        }
+
+        var rdlg = null;
+        function resetPw(u, trigger) {
+          if (rdlg) rdlg.el.remove();
+          rdlg = P.dialog("user-reset-dialog", "重設 " + u.name + " 的密碼");
+          rdlg.body.appendChild(
+            h("p", {
+              class: "lead",
+              text: "使用者用這組密碼登入後，必須先自行設定新密碼。",
+            }),
+          );
+          var inp = h("input", {
+            tid: "user-reset-password-input",
+            type: "password",
+            autocomplete: "new-password",
+          });
+          rdlg.body.appendChild(
+            P.field(
+              "新的臨時密碼",
+              inp,
+              "長度須為 8 到 128 個字元。送出後不會再顯示。",
+              "user-reset-password-input-error",
+            ),
+          );
+          var ok = h("button", {
+            class: "btn primary",
+            tid: "user-reset-dialog-confirm",
+            text: "重設密碼",
+          });
+          ok.addEventListener("click", function () {
+            var l = inp.value.length;
+            if (l < 8 || l > 128) {
+              P.fieldErr(inp, "密碼長度須為 8 到 128 個字元。請重新輸入。");
+              inp.focus();
+              return;
+            }
+            ok.disabled = true;
+            ok.textContent = "處理中…";
+            setTimeout(function () {
+              rdlg.close();
+              u.mustChange = true;
+              P.toast("已重設 " + u.name + " 的密碼，對方下次登入須先改密碼。");
+              draw();
+            }, 500);
+          });
+          rdlg.foot.appendChild(
+            h("button", {
+              class: "btn",
+              tid: "user-reset-dialog-cancel",
+              text: "取消",
+              onclick: function () {
+                rdlg.close();
+              },
+            }),
+          );
+          rdlg.foot.appendChild(ok);
+          rdlg.open(trigger);
+        }
+        function disable(u, trigger) {
+          var items = IMPACT[u.id] || [];
+          P.impactDialog(
+            {
+              tid: "user-impact-dialog",
+              title: "停用 " + u.name,
+              intro: function (n, w) {
+                return (
+                  "停用後，以下 " +
+                  n +
+                  " 筆未來預約會被取消，" +
+                  w +
+                  " 筆候補會失效，預約者會收到通知。"
+                );
+              },
+              items: items,
+              waitlist: u.id === "u3" ? 1 : 0,
+              confirmLabel: "確認停用並取消預約",
+              cancelLabel: "先不要停用",
+              changedItems:
+                q.get("changed") === "1"
+                  ? items.concat([
+                      "小型討論室 A，2026年11月20日（週五） 09:00–10:00，已確認",
+                    ])
+                  : null,
+              onConfirm: function (n, w) {
+                u.active = false;
+                P.toast(
+                  "帳號已停用，已取消 " +
+                    n +
+                    " 筆預約，" +
+                    w +
+                    " 筆候補已失效。",
+                );
+                draw();
+              },
+            },
+            trigger,
+          );
+        }
+        draw();
+      })();
+    </script>
+  </body>
+</html>

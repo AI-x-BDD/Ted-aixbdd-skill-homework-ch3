@@ -1,0 +1,4784 @@
+openapi: 3.1.0
+info:
+  title: 場地／會議室預約系統 API
+  version: 1.0.0
+  description: |
+    單一公司內部使用的場地預約後端。帳號與登入、場地與維護時段、場地搜尋與行事曆、單次與週期性預約、審核、候補、站內通知、規則管理與報表。
+
+    共通約定：
+    - 認證：登入後由伺服器設定 HttpOnly cookie `sid`（階段憑證）。除登入外所有操作都需登入，未登入回 401。帳號被標示為須先改密碼（mustChangePassword）時，除「查詢自己」「變更密碼」「登出」以外一律 403，訊息為「請先設定新密碼」。非 GET 請求須為 application/json，且帶有 Origin 標頭時必須屬於允許的來源，否則 403。
+    - 角色：employee（所有帳號皆具備）、reviewer（場地審核者）、admin（系統管理員）。各操作的 description 寫明可呼叫的角色；授權以伺服器為準，略過畫面直接送出也會被拒絕。
+    - 時間：所有時間以台北時間（UTC+8）為準。請求的日期為 `YYYY-MM-DD`、時間為 `HH:mm`（台北當地），伺服器轉成 UTC 儲存；回應的預約、時段、維護時段同時提供台北當地欄位（date、startTime、endTime）與 ISO 8601 UTC 欄位（startAt、endAt）。結束時間可為 `24:00`（表示當日結束）；開始時間最晚 `23:30`。星期以數字表示，0 為週日、6 為週六。週檢視一週為週一至週日。
+    - 時間格式（C-SH-02）：回應與資料結構中所有時間點屬性（名稱以 At 結尾，例如 startAt、endAt、createdAt、suspendedUntil）一律為 `type: string`、`format: date-time` 的帶 Z 的 ISO 8601 UTC 字串，例如 `2026-11-20T02:00:00.000Z`；使用者輸入的預約時間（建立、修改、候補、維護時段、報表區間、行事曆與衝突預覽查詢）一律為台北當地的 `date`（YYYY-MM-DD）加 `startTime`、`endTime`（HH:mm），不接受帶時區或偏移量的時間戳，由伺服器轉為 UTC。x-inner-needs 中表示時間點的資料欄位一律以 `_at` 結尾且為 UTC（例如 start_at、suspended_until_at、slot_start_at）；`open_minute`、`close_minute` 為台北當地一天內的分鐘數，週期性批次的 `start_time`、`end_time` 為台北當地 HH:mm，皆不是時間點。
+    - 狀態代碼（C-SH-01）：預約狀態（BookingStatus）為 pending、confirmed、checked_in、completed、rejected、cancelled、no_show；週期性預約批次狀態（SeriesStatus）為 pending、confirmed、rejected、cancelled，與預約共用同一組英文 snake_case 代碼，中文名稱只作顯示文案。批次核准後為 confirmed（沒有 approved），整批所有場次皆取消後為 cancelled。
+    - 「現在」一律由伺服器判定：回應內含「目前台北日期」、各預約的可取消／可修改／可報到旗標，前端不以裝置時鐘判斷。
+    - 規則單位：規則以分鐘、天、筆、批、個月、次儲存；管理畫面的「單次時長上限」「逾時取消門檻」「候補截止門檻」以小時顯示，API 的規則管理操作（/api/rules）以畫面單位（小時）收發並由伺服器換算，GET /api/context 的規則值則一律以儲存單位（分鐘）回傳。
+    - 分頁：列表以 limit／offset 分頁，回應含 items 與 total。
+    - 錯誤：失敗回應一律為 Error 結構，訊息為繁體中文，說明發生什麼事與可以怎麼做，不含內部代碼或技術細節。狀態碼：400 格式或規則驗證未通過、401 未登入、403 無權限、404 資源不存在、409 與目前狀態衝突（時段被占用、已被處理、額度已達上限、影響範圍已變動）。
+    - 預約規則驗證分兩類：僅依請求內容與目前時間即可判定的規則（30 分鐘單位、長度、已過去、最遠可預約日、開放時段、人數）未通過時回 400；需讀取資料庫狀態才能判定的規則（時段被占用、持有上限、週期性批數上限、預約權限暫停、場地已停用）未通過時回 409。同一請求出現多項未通過時，在同一個狀態碼下以 violations 全部列出。
+    - 兩段式確認：設定維護時段、停用場地、停用帳號先呼叫影響預覽（只讀），再呼叫確認操作並帶上看過的預約識別清單；伺服器於交易內重算，清單不一致時回 409，Error.impact 附最新影響。
+    - 本檔未列出僅供測試使用的 /__test/clock、/__test/tick（僅 ENABLE_TEST_CLOCK=1 時開放）與建立第一位管理員的啟動指令，它們沒有對應的外層需要。
+    - 背景排程不是 HTTP 操作，其觸發條件與結果寫在頂層 x-background-jobs。
+  x-common-inner-needs:
+    description: 所有需登入的操作在授權前都會做階段驗證，這些讀寫不在各操作的 x-inner-needs 重複列出，資料庫端需涵蓋。
+    data:
+      - name: sessions
+        access: read
+        fields: [token_hash, user_id, expires_at]
+      - name: sessions
+        access: write
+        fields: [expires_at]
+      - name: users
+        access: read
+        fields: [id, is_active, must_change_password, suspended_until_at]
+      - name: user_roles
+        access: read
+        fields: [user_id, role]
+    files: []
+servers:
+  - url: http://127.0.0.1:3000
+    description: 本機後端（正式環境同一行程也提供前端靜態檔）
+tags:
+  - name: 驗證與帳號
+  - name: 系統
+  - name: 場地管理
+  - name: 維護時段
+  - name: 場地搜尋與行事曆
+  - name: 預約
+  - name: 審核
+  - name: 週期性預約
+  - name: 候補
+  - name: 通知
+  - name: 規則
+  - name: 報表
+security:
+  - cookieAuth: []
+paths:
+  /api/auth/login:
+    post:
+      tags: [驗證與帳號]
+      summary: 登入
+      operationId: login
+      description: 對應 UI-01「登入」。以 Email 與密碼驗證；Email 去除前後空白並轉小寫比對。帳號不存在與密碼錯誤回應同一句，且耗時接近。密碼驗證通過後才檢查停用狀態。成功時設定 sid cookie 並回傳目前使用者。不需登入。
+      security: []
+      x-inner-needs:
+        data:
+          - name: users
+            access: read
+            fields:
+              [
+                id,
+                email,
+                name,
+                password_hash,
+                is_active,
+                must_change_password,
+                suspended_until_at,
+              ]
+          - name: user_roles
+            access: read
+            fields: [user_id, role]
+          - name: sessions
+            access: write
+            fields: [token_hash, user_id, expires_at]
+        files: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                password:
+                  type: string
+      responses:
+        "200":
+          description: 登入成功，回應同時設定 sid cookie
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CurrentUser"
+        "400":
+          description: 欄位未填
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Email 或密碼錯誤（兩者不分）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: 帳號已停用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/auth/logout:
+    post:
+      tags: [驗證與帳號]
+      summary: 登出
+      operationId: logout
+      description: 對應 UI-01「登出」。刪除目前階段並清除 cookie。任何已登入角色可呼叫，須先改密碼的帳號也可呼叫。
+      x-inner-needs:
+        data:
+          - name: sessions
+            access: delete
+            fields: [token_hash]
+        files: []
+      responses:
+        "204":
+          description: 已登出
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/auth/me:
+    get:
+      tags: [驗證與帳號]
+      summary: 取得目前使用者
+      operationId: getCurrentUser
+      description: 對應所有頁面的導覽列與路由守衛（UI-01～UI-12）。回傳識別、姓名、Email、角色、是否須先改密碼與預約權限暫停解除時間（暫停已過期時為 null）。須先改密碼的帳號也可呼叫。
+      x-inner-needs:
+        data:
+          - name: users
+            access: read
+            fields: [id, email, name, must_change_password, suspended_until_at]
+          - name: user_roles
+            access: read
+            fields: [user_id, role]
+        files: []
+      responses:
+        "200":
+          description: 目前使用者
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CurrentUser"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/auth/password:
+    put:
+      tags: [驗證與帳號]
+      summary: 變更自己的密碼
+      operationId: changePassword
+      description: 對應 UI-01「變更密碼」。以舊密碼驗證後設定新密碼（長度 8 到 128 個字元）；成功時清除 mustChangePassword 旗標並刪除該帳號所有階段（含目前階段），前端須回到登入頁重新登入。須先改密碼的帳號也可呼叫。
+      x-inner-needs:
+        data:
+          - name: users
+            access: write
+            fields: [password_hash, must_change_password]
+          - name: sessions
+            access: delete
+            fields: [user_id]
+        files: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [oldPassword, newPassword]
+              properties:
+                oldPassword:
+                  type: string
+                newPassword:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+      responses:
+        "204":
+          description: 已變更，所有階段已失效
+        "400":
+          description: 新密碼長度不符，或舊密碼不正確；欄位錯誤放在 fields（oldPassword、newPassword）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/context:
+    get:
+      tags: [系統]
+      summary: 取得目前台北日期與公開規則值
+      operationId: getContext
+      description: 回應 UI-02、UI-03、UI-04、UI-05 對「目前台北日期」與規則值的需要：伺服器目前時間、台北今天日期、最遠可預約日期（今天加最遠可預約天數），以及表單與對話框說明文字用到的規則值（單次時長上限、週期性最長月數、批數上限、持有上限、逾時取消門檻、候補確認時限與截止門檻、報到開放與截止分鐘）。所有已登入角色可呼叫，須先改密碼的帳號不可。
+      x-inner-needs:
+        data:
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      responses:
+        "200":
+          description: 目前時間與規則值
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Context"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/users:
+    get:
+      tags: [驗證與帳號]
+      summary: 列出帳號
+      operationId: listUsers
+      description: 對應 UI-09「瀏覽帳號清單」與 UI-08 的審核者候選。僅管理員。不分頁（規模 200 位以內）；不回傳任何密碼內容。可用 role 與 active 篩選（UI-08 取審核者候選時帶 role=reviewer、active=true）。
+      x-inner-needs:
+        data:
+          - name: users
+            access: read
+            fields:
+              [
+                id,
+                email,
+                name,
+                is_active,
+                must_change_password,
+                suspended_until_at,
+              ]
+          - name: user_roles
+            access: read
+            fields: [user_id, role]
+        files: []
+      parameters:
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [employee, reviewer, admin]
+        - name: active
+          in: query
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: 帳號列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [驗證與帳號]
+      summary: 建立帳號
+      operationId: createUser
+      description: 對應 UI-09「建立帳號」。僅管理員。Email 去除空白並轉小寫後全系統唯一；初始密碼 8 到 128 個字元，不強制首次登入改密碼；employee 角色隱含，不需傳入。
+      x-inner-needs:
+        data:
+          - name: users
+            access: write
+            fields:
+              [email, name, password_hash, is_active, must_change_password]
+          - name: user_roles
+            access: write
+            fields: [user_id, role]
+        files: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserCreateInput"
+      responses:
+        "201":
+          description: 已建立
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: 欄位錯誤（email 格式、name 必填、password 長度），放在 fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Email 已被使用，放在 fields（email）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/users/{userId}:
+    patch:
+      tags: [驗證與帳號]
+      summary: 編輯帳號姓名與角色
+      operationId: updateUser
+      description: 對應 UI-09「編輯帳號」。僅管理員；Email 不可修改。移除 reviewer 角色時，同交易內移除該帳號的場地審核者指派。不得移除最後一位啟用中管理員的 admin 角色。
+      x-inner-needs:
+        data:
+          - name: users
+            access: write
+            fields: [name]
+          - name: user_roles
+            access: write
+            fields: [user_id, role]
+          - name: venue_reviewers
+            access: delete
+            fields: [user_id]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserUpdateInput"
+      responses:
+        "200":
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: 欄位錯誤（name 必填），放在 fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 帳號不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 不能移除最後一位管理員的管理員角色
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/users/{userId}/password:
+    put:
+      tags: [驗證與帳號]
+      summary: 管理員重設密碼
+      operationId: resetUserPassword
+      description: 對應 UI-09「重設密碼」。僅管理員。設定新的臨時密碼（8 到 128 個字元），把 mustChangePassword 設為 true，並刪除該帳號所有階段，使其下次登入須先自行改密碼。密碼不會再被回傳。
+      x-inner-needs:
+        data:
+          - name: users
+            access: write
+            fields: [password_hash, must_change_password]
+          - name: sessions
+            access: delete
+            fields: [user_id]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newPassword]
+              properties:
+                newPassword:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+      responses:
+        "204":
+          description: 已重設
+        "400":
+          description: 密碼長度錯誤，放在 fields（newPassword）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 帳號不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/users/{userId}/deactivation-impact:
+    get:
+      tags: [驗證與帳號]
+      summary: 預覽停用帳號的影響
+      operationId: previewUserDeactivation
+      description: 對應 UI-09「預覽停用影響」。僅管理員。只讀、不寫入。列出該帳號尚未開始、狀態為待審核或已確認的預約（週期性場次逐場列出），以及會失效的候補數（等候中與保留中）。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: read
+            fields: [id, user_id, venue_id, start_at, end_at, status, series_id]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: waitlist_entries
+            access: read
+            fields: [id, user_id, status]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "200":
+          description: 受影響的預約與候補數
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImpactPreview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 帳號不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/users/{userId}/deactivate:
+    post:
+      tags: [驗證與帳號]
+      summary: 確認停用帳號
+      operationId: deactivateUser
+      description: 對應 UI-09「確認停用」。僅管理員。交易內重算受影響預約，與 bookingIds 一致才執行：逐筆以管理員身分取消預約（原因「管理員停用帳號」，不標記逾時取消、不計入取消率，通知預約者）、使該帳號所有等候中與保留中候補失效並釋放保留時段、將帳號停用並刪除其階段。不得停用自己，也不得停用最後一位啟用中的管理員。
+      x-inner-needs:
+        data:
+          - name: users
+            access: write
+            fields: [is_active]
+          - name: sessions
+            access: delete
+            fields: [user_id]
+          - name: bookings
+            access: write
+            fields: [id, status, late_cancel]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: waitlist_entries
+            access: write
+            fields: [id, status, close_reason, closed_at]
+          - name: notifications
+            access: write
+            fields:
+              [
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+              ]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImpactConfirmInput"
+      responses:
+        "200":
+          description: 已停用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImpactResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 帳號不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 影響範圍在預覽後已變動（Error.impact 附最新清單，尚未停用），或停用自己／最後一位管理員
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/users/{userId}/enable:
+    post:
+      tags: [驗證與帳號]
+      summary: 重新啟用帳號
+      operationId: enableUser
+      description: 對應 UI-09「重新啟用帳號」。僅管理員。啟用不恢復先前被取消的預約與失效的候補。
+      x-inner-needs:
+        data:
+          - name: users
+            access: write
+            fields: [is_active]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/userId"
+      responses:
+        "200":
+          description: 已啟用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 帳號不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/venues:
+    get:
+      tags: [場地搜尋與行事曆]
+      summary: 搜尋啟用中的場地
+      operationId: searchVenues
+      description: |
+        對應 UI-02「瀏覽場地列表」「設定篩選」，以及 UI-03、UI-05 的啟用場地列表。所有已登入角色可呼叫。只回傳啟用中的場地；不帶條件時列出全部啟用場地。
+        篩選規則：給 date 與 startTime、endTime 時，只列出該時段完全可預約的場地（啟用、完全落在開放時段內、未過去、未超過最遠可預約日、沒有有效預約／候補保留／維護時段占用）；只給 date 時，列出當日至少有一個可預約時段的場地；給了時間卻沒給 date 回 400。capacity 為最小容納人數；equipment 可重複，場地須具備所有指定設備。startTime、endTime 須成對出現，結束須晚於開始，否則 400 並在 fields 標示。
+        回應另附 equipmentOptions（啟用中場地出現過的設備名稱，供篩選勾選）。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: read
+            fields:
+              [
+                id,
+                name,
+                location,
+                capacity,
+                equipment,
+                requires_approval,
+                is_active,
+              ]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: booking_slots
+            access: read
+            fields: [venue_id, slot_start_at]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - name: date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: startTime
+          in: query
+          schema:
+            $ref: "#/components/schemas/TimeOfDay"
+        - name: endTime
+          in: query
+          schema:
+            $ref: "#/components/schemas/EndTimeOfDay"
+        - name: capacity
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - name: equipment
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        "200":
+          description: 符合條件的啟用場地（可為空陣列）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VenueList"
+        "400":
+          description: 篩選條件不合法（結束不晚於開始、只給時間沒給日期、人數不是正整數），欄位放在 fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/venues/{venueId}/calendar:
+    get:
+      tags: [場地搜尋與行事曆]
+      summary: 取得場地日／週行事曆
+      operationId: getVenueCalendar
+      description: |
+        對應 UI-02「開啟行事曆」「切換日／週檢視」「切換日期」。所有已登入角色可呼叫。回傳 date 所在日（view=day）或所在週一至週日（view=week）每天 48 個 30 分鐘時段的狀態，不含預約者與主題。
+        時段狀態判定優先序：closed（不在開放時段內、開始時間早於現在、超過最遠可預約日）、maintenance（維護時段）、booked（有效預約或候補保留）、available（可預約）。已過去的時段一律為 closed，不論原本是否被預約。回應含目前台北日期與每天的開放區間，前端可用來裁切與判斷整天不開放。啟用中的場地才有行事曆，停用或不存在回 404。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: read
+            fields: [id, name, location, is_active]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: booking_slots
+            access: read
+            fields: [venue_id, slot_start_at, holder_type]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+        - name: date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: view
+          in: query
+          schema:
+            type: string
+            enum: [day, week]
+            default: day
+      responses:
+        "200":
+          description: 行事曆
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Calendar"
+        "400":
+          description: 日期格式不正確
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在或已停用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/admin/venues:
+    get:
+      tags: [場地管理]
+      summary: 列出全部場地
+      operationId: listAdminVenues
+      description: 對應 UI-08「瀏覽場地清單」。僅管理員。含已停用場地，附審核者與開放時段。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: read
+            fields:
+              [
+                id,
+                name,
+                location,
+                capacity,
+                equipment,
+                requires_approval,
+                is_active,
+              ]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: users
+            access: read
+            fields: [id, name, email]
+        files: []
+      responses:
+        "200":
+          description: 全部場地
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminVenueList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [場地管理]
+      summary: 新增場地
+      operationId: createVenue
+      description: 對應 UI-08「新增場地」。僅管理員。名稱全系統唯一；容納人數為正整數；開放時段依星期設定、30 分鐘單位、結束晚於開始（可到 24:00）且同一星期的各段不得重疊；需要審核時至少指派一位具 reviewer 角色的啟用帳號。新場地為啟用。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: write
+            fields:
+              [
+                name,
+                location,
+                capacity,
+                equipment,
+                requires_approval,
+                is_active,
+              ]
+          - name: venue_opening_hours
+            access: write
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: venue_reviewers
+            access: write
+            fields: [venue_id, user_id]
+          - name: users
+            access: read
+            fields: [id, is_active]
+          - name: user_roles
+            access: read
+            fields: [user_id, role]
+        files: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VenueInput"
+      responses:
+        "201":
+          description: 已建立
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminVenue"
+        "400":
+          description: 欄位錯誤（name、capacity、openingHours、reviewerIds），放在 fields；需審核但未指派審核者時 fields 標示 reviewerIds
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: 名稱已被使用，放在 fields（name）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/admin/venues/{venueId}:
+    put:
+      tags: [場地管理]
+      summary: 編輯場地
+      operationId: updateVenue
+      description: 對應 UI-08「編輯場地」。僅管理員。以完整內容取代（含開放時段與審核者）。編輯結果只適用之後的新預約與新修改，不改變既有預約的狀態與時段，也不取消待審核申請；啟用狀態不在此修改（見 deactivate／enable）。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: write
+            fields: [name, location, capacity, equipment, requires_approval]
+          - name: venue_opening_hours
+            access: write
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: venue_reviewers
+            access: write
+            fields: [venue_id, user_id]
+          - name: users
+            access: read
+            fields: [id, is_active]
+          - name: user_roles
+            access: read
+            fields: [user_id, role]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VenueInput"
+      responses:
+        "200":
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminVenue"
+        "400":
+          description: 欄位錯誤，同新增場地
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 名稱已被使用，放在 fields（name）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/admin/venues/{venueId}/deactivation-impact:
+    get:
+      tags: [場地管理]
+      summary: 預覽停用場地的影響
+      operationId: previewVenueDeactivation
+      description: 對應 UI-08「預覽停用影響」。僅管理員。只讀、不寫入。列出該場地尚未開始、狀態為待審核或已確認的預約，與會失效的候補數（等候中與保留中）。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: read
+            fields: [id, user_id, venue_id, start_at, end_at, status]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name, is_active]
+          - name: waitlist_entries
+            access: read
+            fields: [id, venue_id, status]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+      responses:
+        "200":
+          description: 受影響的預約與候補數
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImpactPreview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/admin/venues/{venueId}/deactivate:
+    post:
+      tags: [場地管理]
+      summary: 確認停用場地
+      operationId: deactivateVenue
+      description: 對應 UI-08「確認停用」。僅管理員。交易內重算受影響預約，與 bookingIds 一致才執行：逐筆以管理員身分取消預約（原因「場地停用」，不標記逾時取消、不計入取消率，通知預約者）、使該場地等候中與保留中候補失效並釋放保留時段、通知候補者、將場地設為停用。釋出的時段不通知候補（場地已停用）。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: write
+            fields: [is_active]
+          - name: bookings
+            access: write
+            fields: [id, status, late_cancel]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: waitlist_entries
+            access: write
+            fields: [id, status, close_reason, closed_at]
+          - name: notifications
+            access: write
+            fields:
+              [
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+              ]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImpactConfirmInput"
+      responses:
+        "200":
+          description: 已停用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImpactResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 影響範圍在預覽後已變動（Error.impact 附最新清單，尚未停用）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/admin/venues/{venueId}/enable:
+    post:
+      tags: [場地管理]
+      summary: 重新啟用場地
+      operationId: enableVenue
+      description: 對應 UI-08「重新啟用場地」。僅管理員。啟用不恢復先前被取消的預約與失效的候補。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: write
+            fields: [is_active]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+      responses:
+        "200":
+          description: 已啟用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminVenue"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/admin/venues/{venueId}/maintenance-windows:
+    get:
+      tags: [維護時段]
+      summary: 列出場地的維護時段
+      operationId: listMaintenanceWindows
+      description: 對應 UI-08「管理維護時段」的列表。僅管理員。依開始時間由近到遠。
+      x-inner-needs:
+        data:
+          - name: venue_maintenance_windows
+            access: read
+            fields: [id, venue_id, start_at, end_at]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+      responses:
+        "200":
+          description: 維護時段列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceWindowList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    post:
+      tags: [維護時段]
+      summary: 確認新增維護時段
+      operationId: createMaintenanceWindow
+      description: 對應 UI-08「新增維護時段」確認。僅管理員。交易內重算受影響預約（時段內尚未開始、待審核或已確認的預約），與 bookingIds 一致才執行：先以管理員身分取消這些預約（原因「場地維護」，通知預約者，不標記逾時取消），再寫入維護時段並占用時段。沒有受影響預約時 bookingIds 傳空陣列即可直接建立。時間須 30 分鐘為單位、結束晚於開始（結束時間可為 24:00）。
+      x-inner-needs:
+        data:
+          - name: venue_maintenance_windows
+            access: write
+            fields: [venue_id, start_at, end_at]
+          - name: booking_slots
+            access: write
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: bookings
+            access: write
+            fields: [id, status, late_cancel]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: waitlist_entries
+            access: write
+            fields: [id, status, close_reason, closed_at]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, created_at]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaintenanceConfirmInput"
+      responses:
+        "201":
+          description: 已建立
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceResult"
+        "400":
+          description: 時間不正確（結束不晚於開始、非 30 分鐘單位），放在 fields（maintenance）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 影響範圍已變動（Error.impact 附最新清單，尚未建立），或與既有維護時段重疊
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/admin/venues/{venueId}/maintenance-windows/impact:
+    post:
+      tags: [維護時段]
+      summary: 預覽維護時段的影響
+      operationId: previewMaintenanceImpact
+      description: 對應 UI-08「新增或編輯維護時段」的影響預覽。僅管理員。只讀、不寫入（使用 POST 只因為需要請求本文）。回傳指定起訖內尚未開始、待審核或已確認的預約；編輯既有維護時段時帶 excludeWindowId 以排除自己。時間不正確時回 400。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: read
+            fields: [id, user_id, venue_id, start_at, end_at, status]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: venue_maintenance_windows
+            access: read
+            fields: [id, venue_id, start_at, end_at]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaintenanceInput"
+      responses:
+        "200":
+          description: 受影響的預約
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImpactPreview"
+        "400":
+          description: 時間不正確，放在 fields（maintenance）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/admin/venues/{venueId}/maintenance-windows/{windowId}:
+    put:
+      tags: [維護時段]
+      summary: 確認編輯維護時段
+      operationId: updateMaintenanceWindow
+      description: 對應 UI-08「編輯維護時段」確認。僅管理員。流程同新增：重算受影響預約並與 bookingIds 比對，取消後釋出舊維護時段占用、占用新時段；舊時段釋出後會觸發候補遞補掛勾。同交易全有或全無。
+      x-inner-needs:
+        data:
+          - name: venue_maintenance_windows
+            access: write
+            fields: [id, venue_id, start_at, end_at]
+          - name: booking_slots
+            access: write
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: bookings
+            access: write
+            fields: [id, status, late_cancel]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: waitlist_entries
+            access: write
+            fields: [id, status, offer_expires_at]
+          - name: notifications
+            access: write
+            fields:
+              [
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+              ]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+        - $ref: "#/components/parameters/windowId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaintenanceConfirmInput"
+      responses:
+        "200":
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceResult"
+        "400":
+          description: 時間不正確，放在 fields（maintenance）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地或維護時段不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 影響範圍已變動（Error.impact 附最新清單，尚未更新），或與其他維護時段重疊
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      tags: [維護時段]
+      summary: 刪除維護時段
+      operationId: deleteMaintenanceWindow
+      description: 對應 UI-08「刪除維護時段」。僅管理員。刪除維護時段並釋出其占用的時段，時段恢復為可預約，並對釋出範圍呼叫候補遞補掛勾。刪除前的確認對話框由前端處理。
+      x-inner-needs:
+        data:
+          - name: venue_maintenance_windows
+            access: delete
+            fields: [id, venue_id]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: waitlist_entries
+            access: write
+            fields: [id, status, offer_expires_at]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, waitlist_entry_id, created_at]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+        - $ref: "#/components/parameters/windowId"
+      responses:
+        "204":
+          description: 已刪除
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地或維護時段不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/bookings:
+    post:
+      tags: [預約]
+      summary: 建立單次預約
+      operationId: createBooking
+      description: |
+        對應 UI-03「送出單次預約」。所有已登入角色皆以一般員工身分為自己預約（管理員不能代他人預約）。
+        流程：先以純函式檢查 30 分鐘單位、長度（至少 30 分鐘、不超過單次時長上限）、開始時間不早於現在、日期不晚於最遠可預約日、完全落在開放時段內、人數 1 至容納人數、主題必填（至多 100 字）；任一未通過回 400 並在 violations 全部列出。通過後在交易內先鎖使用者列，檢查預約權限暫停、持有上限（週期性整批算 1 筆），再寫入預約與 30 分鐘時段占用；時段被占用、額度已達上限、暫停中或場地已停用回 409 並以 violations 說明。不需審核的場地成立即為已確認，需審核的場地為待審核並先占用時段；有審核者時通知審核者，申請者本人是審核者時改由同場地其他審核者或管理員。成立時通知預約者並留下操作紀錄。併發時同場地同時段只有一人成功。
+      x-inner-needs:
+        data:
+          - name: users
+            access: read
+            fields: [id, suspended_until_at]
+          - name: venues
+            access: read
+            fields: [id, name, capacity, requires_approval, is_active]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+          - name: bookings
+            access: write
+            fields:
+              [
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                status,
+                series_id,
+                late_cancel,
+                confirmed_at,
+                reminder_sent_at,
+              ]
+          - name: booking_slots
+            access: write
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, created_at]
+        files: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingInput"
+      responses:
+        "201":
+          description: 預約已成立（confirmed）或已送出等待審核（pending）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "400":
+          description: 未通過的規則（violations），或欄位錯誤（fields：subject、attendees 等）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 時段已被占用（occupied）、已達持有上限（quota）、預約權限暫停（suspended，訊息含解除時間）、場地已停用（venue_inactive）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/bookings/mine:
+    get:
+      tags: [預約]
+      summary: 我的預約列表
+      operationId: listMyBookings
+      description: |
+        對應 UI-04「瀏覽我的預約」與 UI-03 修改模式載入既有預約。所有已登入角色，只回傳自己的預約。
+        分頁範圍：tab=upcoming 為「即將到來」，指狀態為待審核、已確認、已報到且結束時間尚未到的預約（含已開始但仍在報到時間內的已確認預約），依開始時間由近到遠；tab=past 為「已結束」，指其餘全部（已完成、已駁回、已取消、未到場，以及結束時間已過者），依開始時間由新到舊。範圍由伺服器依目前時間判定。
+        每筆附可取消、可修改、可報到旗標、修改被擋的原因、可報到時間範圍、駁回／取消原因與操作者，以及週期性場次序號與整批是否仍待審核，前端不自行以裝置時鐘判斷。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: read
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                status,
+                late_cancel,
+                series_id,
+                series_index,
+              ]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: booking_series
+            access: read
+            fields: [id, status, last_date, session_count]
+          - name: booking_events
+            access: read
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                to_status,
+                reason,
+                occurred_at,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - name: tab
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [upcoming, past]
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: 預約分頁
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MyBookingList"
+        "400":
+          description: tab 缺少或不合法
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/bookings/{bookingId}:
+    get:
+      tags: [預約]
+      summary: 取得單筆預約
+      operationId: getBooking
+      description: 對應 UI-03 修改模式載入既有預約（識別、場地、日期、起訖、主題、人數、狀態、是否為週期性場次、同批最後一場日期、整批是否仍待審核，以及可修改旗標）。只有預約者本人可讀取；他人預約回 403。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: read
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                status,
+                late_cancel,
+                series_id,
+                series_index,
+              ]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: booking_series
+            access: read
+            fields: [id, status, last_date, session_count]
+          - name: booking_events
+            access: read
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                to_status,
+                reason,
+                occurred_at,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/bookingId"
+      responses:
+        "200":
+          description: 預約
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MyBooking"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 預約不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    put:
+      tags: [預約]
+      summary: 修改預約
+      operationId: updateBooking
+      description: |
+        對應 UI-03「修改預約」。僅預約者本人；管理員不得修改。只有尚未開始、狀態為待審核或已確認的預約可修改；週期性場次所屬整批仍待審核時不得修改，週期性場次的新日期不得晚於同批最後一場且不受最遠可預約日限制。以完整內容送出（場地、日期、起訖、主題、人數）。
+        只改主題或人數：只更新預約欄位（人數仍須不超過容納人數），狀態與時段不變，不重新審核。改場地、日期或起訖：重跑單位、長度、已過去、最遠可預約日、開放時段、人數與時段衝突檢查（不把自己的時段算成衝突），不重算持有筆數、不受預約權限暫停影響；成功時同交易內釋出原時段並占用新時段，原時段釋出後呼叫候補遞補掛勾；修改後的場地需要審核時狀態變為待審核，否則為已確認，通知預約者。全有或全無，失敗時預約維持原場地、原時段、原內容與原狀態。不記為取消或逾時取消。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: write
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                status,
+                series_id,
+                confirmed_at,
+                reminder_sent_at,
+              ]
+          - name: booking_series
+            access: read
+            fields: [id, status, last_date]
+          - name: venues
+            access: read
+            fields: [id, name, capacity, requires_approval, is_active]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: booking_slots
+            access: write
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                id,
+                venue_id,
+                start_at,
+                end_at,
+                status,
+                offer_expires_at,
+                created_at,
+              ]
+          - name: notifications
+            access: write
+            fields:
+              [
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/bookingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingInput"
+      responses:
+        "200":
+          description: 已修改，回傳新狀態（confirmed 或 pending）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "400":
+          description: 未通過的規則（violations，含週期性場次日期晚於同批最後一場 series_range），或欄位錯誤（fields）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 非本人預約，或其他無權限情形
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 預約或新場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 已開始或已結束（started）、狀態不可修改（status）、整批仍在審核（series_pending）、新時段已被占用（occupied）、場地已停用（venue_inactive）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/bookings/{bookingId}/cancel:
+    post:
+      tags: [預約]
+      summary: 取消預約或週期性場次
+      operationId: cancelBooking
+      description: |
+        對應 UI-04「取消預約」「取消週期性場次」，並服務 API-06 的取消單一場次與取消其後場次。僅預約者本人。只有尚未開始、待審核或已確認的預約可取消。scope 預設 single；scope=following 僅對週期性場次有效，取消該場次及同批之後所有尚未開始、待審核或已確認的場次（已開始的場次不受影響），非週期性預約帶 following 視同 single。
+        每個被取消的場次各自判定：距開始 1 小時以內（含剛好；門檻取自規則）記為逾時取消。取消後時段立即釋出並對釋出範圍呼叫候補遞補掛勾；整批在第一場開始前全部取消時，該批不再占用持有筆數與批數額度。整個請求在單一交易內，留下操作紀錄；管理員取消請用 /api/admin/bookings/{bookingId}/cancel。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: write
+            fields:
+              [
+                id,
+                user_id,
+                status,
+                late_cancel,
+                series_id,
+                series_index,
+                start_at,
+              ]
+          - name: booking_series
+            access: write
+            fields: [id, status]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                id,
+                venue_id,
+                start_at,
+                end_at,
+                status,
+                offer_expires_at,
+                created_at,
+              ]
+          - name: notifications
+            access: write
+            fields:
+              [
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/bookingId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scope:
+                  type: string
+                  enum: [single, following]
+                  default: single
+      responses:
+        "200":
+          description: 已取消
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 非本人預約，或其他無權限情形
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 預約不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 預約已開始（started）或狀態不可取消（status）；指定場次本身不可取消時整個請求失敗，不取消任何場次
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/bookings/{bookingId}/check-in:
+    post:
+      tags: [預約]
+      summary: 報到
+      operationId: checkInBooking
+      description: 對應 UI-04「報到」。僅預約者本人（管理員不得代為報到）。狀態須為已確認，且目前時間在「開始前報到開放分鐘」到「開始後報到截止分鐘」之間（含兩端；截止晚於預約結束時以結束時間為截止）。預約權限暫停中仍可報到。成功改為已報到並留下操作紀錄。失敗時訊息說明可報到的起訖時間，Error.violations 以 rule 區分 not_in_window 與 status。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: write
+            fields: [id, user_id, start_at, end_at, status]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/bookingId"
+      responses:
+        "200":
+          description: 已報到
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 非本人預約，或其他無權限情形
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 預約不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 不在報到時間內（not_in_window，訊息含可報到起訖）或狀態不是已確認（status）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/admin/bookings:
+    get:
+      tags: [預約]
+      summary: 管理員查詢全部預約
+      operationId: listAdminBookings
+      description: 對應 UI-10「瀏覽全部預約」「篩選」。僅管理員。依開始時間由新到舊；from、to 為台北日期（含頭含尾，依預約開始時間）；keyword 以預約者姓名部分比對。to 早於 from 回 400。每筆附是否可由管理員取消旗標（尚未開始、待審核或已確認）。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: read
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                status,
+                late_cancel,
+                series_id,
+                series_index,
+              ]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+        files: []
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: venueId
+          in: query
+          schema:
+            type: integer
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/BookingStatus"
+        - name: keyword
+          in: query
+          schema:
+            type: string
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: 預約分頁
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminBookingList"
+        "400":
+          description: 日期區間不正確
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/admin/bookings/{bookingId}/events:
+    get:
+      tags: [預約]
+      summary: 查看預約的操作紀錄
+      operationId: listBookingEvents
+      description: 對應 UI-10「查看操作紀錄」。僅管理員。唯讀，由舊到新列出時間、操作者（系統自動處理時 actorName 為 null、actorType 為 system）、變更前後狀態與原因；沒有任何修改或刪除操作。
+      x-inner-needs:
+        data:
+          - name: booking_events
+            access: read
+            fields:
+              [
+                id,
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: bookings
+            access: read
+            fields: [id]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/bookingId"
+      responses:
+        "200":
+          description: 操作紀錄
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookingEventList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 預約不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/admin/bookings/{bookingId}/cancel:
+    post:
+      tags: [預約]
+      summary: 管理員取消預約
+      operationId: adminCancelBooking
+      description: 對應 UI-10「管理員取消」。僅管理員。只有尚未開始、待審核或已確認的預約可取消，必須填寫非空白原因。只取消該筆（週期性場次只影響該場次）；不標記逾時取消、不計入報表取消率；記錄操作的管理員與原因、通知預約者、釋出時段並呼叫候補遞補掛勾。管理員不得代為預約或修改預約。 若取消後該批已沒有未取消的場次，批次狀態（status）改為 cancelled。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: write
+            fields: [id, status, late_cancel, start_at, series_id]
+          - name: booking_series
+            access: write
+            fields: [id, status]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                id,
+                venue_id,
+                start_at,
+                end_at,
+                status,
+                offer_expires_at,
+                created_at,
+              ]
+          - name: notifications
+            access: write
+            fields:
+              [
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/bookingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  description: 取消原因，必填、非空白
+      responses:
+        "200":
+          description: 已取消
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminBooking"
+        "400":
+          description: 未填原因，放在 fields（reason）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 預約不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 預約已開始（started）或狀態不可取消（status）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/reviews:
+    get:
+      tags: [審核]
+      summary: 待審核清單
+      operationId: listReviews
+      description: 對應 UI-07「查看待審核清單」。reviewer 與 admin 可呼叫，其他角色 403。reviewer 只看到被指派場地的待審核申請，且不含自己送出的申請；admin 只看到申請者本人就是該場地唯一審核者而交由管理員審核的申請（assignedToAdmin 為 true），且不含管理員自己送出的申請。週期性整批以一筆顯示（kind=series），只計未取消的場次；整批已通過審核後個別被改回待審核的單一場次以單筆顯示（kind=booking）。依申請送出時間由舊到新。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: read
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                status,
+                series_id,
+                series_index,
+                created_at,
+              ]
+          - name: booking_series
+            access: read
+            fields: [id, status, frequency, first_date, last_date]
+          - name: venues
+            access: read
+            fields: [id, name, requires_approval]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: users
+            access: read
+            fields: [id, name]
+        files: []
+      responses:
+        "200":
+          description: 待審核申請
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/reviews/bookings/{bookingId}/approve:
+    post:
+      tags: [審核]
+      summary: 核准單筆申請
+      operationId: approveBooking
+      description: 對應 UI-07「核准」（單筆）。僅負責該場地且非申請者本人的審核者；申請者本人是唯一審核者時由管理員。狀態以條件更新由待審核轉為已確認，同時兩人處理時只有先送達者生效。核准後通知預約者並留下操作紀錄，重設提醒時間欄位。開始時間已到的申請不可核准。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: write
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                status,
+                confirmed_at,
+                reminder_sent_at,
+              ]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, created_at]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/bookingId"
+      responses:
+        "200":
+          description: 已核准
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 非負責該場地的審核者，或審核自己送出的申請
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 申請不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 此申請已被處理，或開始時間已到
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/reviews/bookings/{bookingId}/reject:
+    post:
+      tags: [審核]
+      summary: 駁回單筆申請
+      operationId: rejectBooking
+      description: 對應 UI-07「駁回」（單筆）。授權同核准。必須填寫非空白原因。狀態由待審核轉為已駁回，釋出時段並呼叫候補遞補掛勾，通知預約者（含原因）並留下操作紀錄。因修改而回到待審核的預約被駁回後不恢復原時段。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: write
+            fields: [id, user_id, venue_id, start_at, status]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                id,
+                venue_id,
+                start_at,
+                end_at,
+                status,
+                offer_expires_at,
+                created_at,
+              ]
+          - name: notifications
+            access: write
+            fields:
+              [
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/bookingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectInput"
+      responses:
+        "200":
+          description: 已駁回
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewResult"
+        "400":
+          description: 未填原因，放在 fields（reason）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 非負責該場地的審核者，或審核自己送出的申請
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 申請不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 此申請已被處理，或開始時間已到
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/reviews/series/{seriesId}/approve:
+    post:
+      tags: [審核]
+      summary: 核准整批週期性申請
+      operationId: approveSeries
+      description: 對應 UI-07「核准整批」。授權同單筆核准（以該批場地判定）。整批在單一交易內，對所有未取消的場次逐一改為已確認並通知預約者；批次狀態（status）改為 confirmed；回傳受影響的場次數。
+      x-inner-needs:
+        data:
+          - name: booking_series
+            access: write
+            fields: [id, status]
+          - name: bookings
+            access: write
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                status,
+                series_id,
+                confirmed_at,
+                reminder_sent_at,
+              ]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, created_at]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/seriesId"
+      responses:
+        "200":
+          description: 已核准整批
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 非負責該場地的審核者，或審核自己送出的申請
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 批次不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 此申請已被處理，或最早的場次開始時間已到
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/reviews/series/{seriesId}/reject:
+    post:
+      tags: [審核]
+      summary: 駁回整批週期性申請
+      operationId: rejectSeries
+      description: 對應 UI-07「駁回」（整批）。授權同單筆駁回。必須填寫非空白原因。單一交易內把所有未取消的場次改為已駁回、釋出全部時段並呼叫候補遞補掛勾，批次狀態（status）改為 rejected，通知預約者（含原因）。
+      x-inner-needs:
+        data:
+          - name: booking_series
+            access: write
+            fields: [id, status]
+          - name: bookings
+            access: write
+            fields: [id, user_id, venue_id, start_at, status, series_id]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                id,
+                venue_id,
+                start_at,
+                end_at,
+                status,
+                offer_expires_at,
+                created_at,
+              ]
+          - name: notifications
+            access: write
+            fields:
+              [
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/seriesId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectInput"
+      responses:
+        "200":
+          description: 已駁回整批
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReviewResult"
+        "400":
+          description: 未填原因，放在 fields（reason）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 非負責該場地的審核者，或審核自己送出的申請
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 批次不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 此申請已被處理，或最早的場次開始時間已到
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/booking-series/preview:
+    post:
+      tags: [週期性預約]
+      summary: 檢查週期性預約的各場次
+      operationId: previewBookingSeries
+      description: |
+        對應 UI-03「檢查衝突」。所有已登入角色。只讀、不寫入、不鎖定（使用 POST 只因為需要請求本文）。由第一場日期、頻率（weekly 間隔 7 天、biweekly 間隔 14 天）與最後一場日期展開場次，每場同一星期、同一起訖時間。
+        整批層級檢查：第一場須符合最遠可預約日且不得已過去、最後一場不晚於第一場起算最長月數、單位與長度、人數、主題；未通過回 400（violations，rule 含 first_session_range、series_max_months 與單次規則）。持有上限、週期性批數上限與預約權限暫停以目前資料判斷，未通過回 409（rule 為 quota、series_quota、suspended）。
+        逐場檢查：開放時段以外（closed）、維護時段（maintenance）、時段已被占用（occupied），每場回報是否可建立與衝突原因；後續場次不受最遠可預約日限制。全部場次都衝突時仍回 200，availableCount 為 0。
+      x-inner-needs:
+        data:
+          - name: users
+            access: read
+            fields: [id, suspended_until_at]
+          - name: venues
+            access: read
+            fields: [id, name, capacity, is_active]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: booking_slots
+            access: read
+            fields: [venue_id, slot_start_at, holder_type]
+          - name: bookings
+            access: read
+            fields: [user_id, status, start_at, series_id]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SeriesInput"
+      responses:
+        "200":
+          description: 逐場檢查結果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeriesPreview"
+        "400":
+          description: 整批規則未通過（violations）或欄位錯誤（fields）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 持有上限（quota）、週期性批數上限（series_quota）、預約權限暫停（suspended）、場地已停用（venue_inactive）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/booking-series:
+    post:
+      tags: [週期性預約]
+      summary: 建立週期性預約
+      operationId: createBookingSeries
+      description: |
+        對應 UI-03「略過衝突並送出」與全部可建立時的直接送出。所有已登入角色。skipDates 為使用者看過並確認略過的衝突日期（必須是展開場次的日期，否則 400）。
+        單一交易、全有或全無：鎖使用者列，重驗整批規則、持有上限（整批算 1 筆）、批數上限與預約權限暫停；對不在 skipDates 的場次依日期順序嘗試占用時段，所有場次嘗試完後只要有任何場次衝突（含新衝突），整個交易回滾、不建立任何場次，以 409 回傳 Error.conflicts 作為最新衝突清單；沒有任何場次可建立時回 400（rule 為 no_sessions）。全部成功才寫入批次、各場次預約與操作紀錄、通知。
+        不需審核的場地所有場次為已確認；需審核的場地所有場次為待審核且批次待審核，審核者看到一筆整批申請，通知審核者。每個場次各自報到、各自判定未到場。
+      x-inner-needs:
+        data:
+          - name: users
+            access: read
+            fields: [id, suspended_until_at]
+          - name: venues
+            access: read
+            fields: [id, name, capacity, requires_approval, is_active]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+          - name: booking_series
+            access: write
+            fields:
+              [
+                user_id,
+                venue_id,
+                frequency,
+                first_date,
+                last_date,
+                start_time,
+                end_time,
+                subject,
+                attendees,
+                status,
+                session_count,
+              ]
+          - name: bookings
+            access: write
+            fields:
+              [
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                status,
+                series_id,
+                series_index,
+                confirmed_at,
+                reminder_sent_at,
+              ]
+          - name: booking_slots
+            access: write
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, created_at]
+        files: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SeriesCreateInput"
+      responses:
+        "201":
+          description: 已建立
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeriesCreated"
+        "400":
+          description: 整批規則未通過（violations），或略過後沒有可建立的場次（no_sessions），或欄位錯誤（fields）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 送出時發現新衝突（Error.conflicts 附最新衝突場次，尚未建立任何場次），或持有上限／批數上限／預約權限暫停／場地已停用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/waitlist:
+    get:
+      tags: [候補]
+      summary: 我的候補
+      operationId: listMyWaitlist
+      description: 對應 UI-05「查看我的候補」。所有已登入角色，只回傳自己的候補。items 為等候中與保留中的候補，保留中的排最前，其餘依登記先後；順位為同場地、同起訖時間、仍在等候中或保留中的候補依登記先後的名次。recent 為最近 30 天內失效、已取消或已遞補成立的候補，最多 20 筆，由新到舊，附失效原因。
+      x-inner-needs:
+        data:
+          - name: waitlist_entries
+            access: read
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                created_at,
+                status,
+                offer_expires_at,
+                close_reason,
+                closed_at,
+                booking_id,
+              ]
+          - name: venues
+            access: read
+            fields: [id, name]
+        files: []
+      responses:
+        "200":
+          description: 我的候補
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WaitlistList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [候補]
+      summary: 登記候補
+      operationId: createWaitlistEntry
+      description: |
+        對應 UI-05「登記候補」，亦服務 UI-02、UI-03 開啟的登記候補對話框。所有已登入角色。內容須符合 30 分鐘單位與長度、未過去、不晚於最遠可預約日、完全落在開放時段內、人數 1 至容納人數（未通過回 400，violations）。時段須目前被有效預約或候補保留占用，未被占用回 409（rule 為 slot_free，訊息提示直接預約）；僅有維護時段占用回 409（maintenance）；同一人同場地同起訖時間已有等候中或保留中的候補回 409（already_waiting）；預約權限暫停回 409（suspended，含解除時間）。候補不計入持有筆數，不受持有上限限制。成功回傳含目前順位的候補。
+      x-inner-needs:
+        data:
+          - name: users
+            access: read
+            fields: [id, suspended_until_at]
+          - name: venues
+            access: read
+            fields: [id, name, capacity, is_active]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: booking_slots
+            access: read
+            fields: [venue_id, slot_start_at, holder_type]
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                created_at,
+                status,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingInput"
+      responses:
+        "201":
+          description: 已登記
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WaitlistEntry"
+        "400":
+          description: 未通過的規則（violations）或欄位錯誤（fields）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 時段空閒請直接預約（slot_free）、僅維護占用（maintenance）、已在候補中（already_waiting）、預約權限暫停（suspended）、場地已停用（venue_inactive）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/waitlist/{entryId}/confirm:
+    post:
+      tags: [候補]
+      summary: 確認遞補
+      operationId: confirmWaitlistEntry
+      description: |
+        對應 UI-05「確認遞補」。僅該候補的登記者。候補須為保留中且未逾保留時限。交易內鎖使用者列，檢查預約權限暫停與持有上限，通過後建立預約（需審核的場地為待審核，否則為已確認），並把保留的時段原地改為該預約占用，保留期間時段從未對外釋出。候補狀態改為已遞補成立。
+        失敗處理：持有上限、預約權限暫停或保留已逾時時，候補被判失效（先提交失效、釋放保留時段並由下一位接手，再回 409），也就是失敗回應之前候補失效已生效，不隨 409 回滾。候補不是保留中（例如仍在等候）回 409 而不使其失效。
+      x-inner-needs:
+        data:
+          - name: users
+            access: read
+            fields: [id, suspended_until_at]
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                id,
+                user_id,
+                status,
+                offer_expires_at,
+                close_reason,
+                closed_at,
+                booking_id,
+              ]
+          - name: venues
+            access: read
+            fields: [id, name, requires_approval, is_active]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: bookings
+            access: write
+            fields:
+              [
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                status,
+                confirmed_at,
+                reminder_sent_at,
+              ]
+          - name: booking_slots
+            access: write
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: notifications
+            access: write
+            fields:
+              [
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/entryId"
+      responses:
+        "201":
+          description: 預約已成立（confirmed）或待審核（pending）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 非本人的候補，或其他無權限情形
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 候補不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 已達持有上限（quota）、預約權限暫停（suspended）、保留已逾時（offer_expired）——這三種情形候補已失效；或候補不是保留中（not_offered）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/waitlist/{entryId}/decline:
+    post:
+      tags: [候補]
+      summary: 放棄遞補
+      operationId: declineWaitlistEntry
+      description: 對應 UI-05「放棄遞補」。僅該候補的登記者。候補須為保留中；改為失效（原因 declined）、釋放保留時段、對該範圍呼叫候補遞補掛勾，由下一位接手，距開始已在候補截止門檻內時改為開放所有人預約。
+      x-inner-needs:
+        data:
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                status,
+                offer_expires_at,
+                close_reason,
+                closed_at,
+              ]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, waitlist_entry_id, created_at]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/entryId"
+      responses:
+        "200":
+          description: 已放棄
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WaitlistEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 非本人的候補，或其他無權限情形
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 候補不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 候補不是保留中
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/waitlist/{entryId}/cancel:
+    post:
+      tags: [候補]
+      summary: 取消候補
+      operationId: cancelWaitlistEntry
+      description: 對應 UI-05「取消候補」。僅該候補的登記者。候補須為等候中，改為已取消，後面的順位依序往前；保留中的候補請改用放棄遞補。
+      x-inner-needs:
+        data:
+          - name: waitlist_entries
+            access: write
+            fields: [id, user_id, status, close_reason, closed_at]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/entryId"
+      responses:
+        "200":
+          description: 已取消
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WaitlistEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 非本人的候補，或其他無權限情形
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: 候補不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 候補不是等候中
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/notifications:
+    get:
+      tags: [通知]
+      summary: 我的通知列表
+      operationId: listNotifications
+      description: 對應 UI-06「瀏覽通知列表」。所有已登入角色，查詢一律限定目前使用者，只看得到發給自己的通知。依發送時間由新到舊（同時間依識別由新到舊），預設每頁 50 筆；回應附未讀數。通知內容在事件發生當下以台北時間組成。
+      x-inner-needs:
+        data:
+          - name: notifications
+            access: read
+            fields:
+              [
+                id,
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+                read_at,
+              ]
+        files: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: 通知分頁
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/notifications/unread-count:
+    get:
+      tags: [通知]
+      summary: 未讀通知數
+      operationId: getUnreadCount
+      description: 對應 UI-06「查看未讀數」（導覽列徽章，前端每 30 秒輪詢）。所有已登入角色，只計算發給自己的未讀通知。
+      x-inner-needs:
+        data:
+          - name: notifications
+            access: read
+            fields: [user_id, read_at]
+        files: []
+      responses:
+        "200":
+          description: 未讀數
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [unreadCount]
+                properties:
+                  unreadCount:
+                    type: integer
+                    minimum: 0
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/notifications/{notificationId}/read:
+    post:
+      tags: [通知]
+      summary: 標記通知為已讀
+      operationId: markNotificationRead
+      description: 對應 UI-06「開啟通知」。所有已登入角色。只能標記發給自己的通知，他人的通知視同不存在回 404。已讀的通知再次標記不改變已讀時間，仍回 200。回傳該則通知與最新未讀數。
+      x-inner-needs:
+        data:
+          - name: notifications
+            access: write
+            fields: [id, user_id, read_at]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/notificationId"
+      responses:
+        "200":
+          description: 已標記
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationReadResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 通知不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/rules:
+    get:
+      tags: [規則]
+      summary: 列出規則
+      operationId: listRules
+      description: 對應 UI-11「查看規則」。僅管理員。回傳 14 條規則的識別、名稱、目前值與單位；單次時長上限、逾時取消門檻、候補截止門檻以小時為單位，其他單位見 unit。
+      x-inner-needs:
+        data:
+          - name: rules
+            access: read
+            fields: [rule_key, int_value, updated_at, updated_by]
+        files: []
+      responses:
+        "200":
+          description: 規則列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/rules/changes:
+    get:
+      tags: [規則]
+      summary: 規則變更紀錄
+      operationId: listRuleChanges
+      description: 對應 UI-11「查看變更紀錄」。僅管理員。唯讀，由新到舊，值以畫面單位表示；沒有任何修改或刪除操作。
+      x-inner-needs:
+        data:
+          - name: rule_changes
+            access: read
+            fields:
+              [id, rule_key, actor_user_id, changed_at, old_value, new_value]
+          - name: users
+            access: read
+            fields: [id, name]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: 變更紀錄分頁
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleChangeList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/rules/{ruleKey}:
+    put:
+      tags: [規則]
+      summary: 修改規則
+      operationId: updateRule
+      description: 對應 UI-11「修改規則」。僅管理員。值須為正整數（拒絕 0、負數、小數、空白），以畫面單位收發，伺服器換算成儲存單位（小時乘以 60 轉分鐘）。同一交易內更新規則並寫入不可更動的變更紀錄。修改只影響之後的新操作，不改變既有預約。
+      x-inner-needs:
+        data:
+          - name: rules
+            access: write
+            fields: [rule_key, int_value, updated_at, updated_by]
+          - name: rule_changes
+            access: write
+            fields: [rule_key, actor_user_id, changed_at, old_value, new_value]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/ruleKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value:
+                  type: integer
+                  minimum: 1
+      responses:
+        "200":
+          description: 已修改，回傳新值
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rule"
+        "400":
+          description: 不是正整數，放在 fields（value），訊息為「須為正整數」並說明如何輸入
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 規則不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /api/reports:
+    get:
+      tags: [報表]
+      summary: 各場地報表
+      operationId: getReport
+      description: |
+        對應 UI-12「設定日期區間並查看」「查看各場地指標」。僅管理員（審核者不可）。from、to 為台北日期，含頭含尾，依預約開始時間落在區間內計算；to 早於 from 回 400。含所有場地（含已停用）。
+        使用率為已報到與已完成預約的總分鐘數除以區間內開放時段扣除維護時段的總分鐘數；尖峰時段為依星期與整點累計已報到與已完成的占用分鐘後的前 3 名；取消率為預約者本人取消的筆數除以非已駁回的預約筆數（管理員取消不計入分子與分母），逾時取消另列筆數；未到場率為未到場筆數除以已報到、已完成、未到場的總筆數。分母為 0 的指標 value 為 null、display 為「無資料」；使用率分子為 0 且分母大於 0 時為 0%。百分比四捨五入到小數點後 1 位，整數不顯示小數點（25% 與 33.3%）。display 即畫面與 CSV 顯示的字串。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: read
+            fields: [id, name, is_active]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: venue_maintenance_windows
+            access: read
+            fields: [venue_id, start_at, end_at]
+          - name: bookings
+            access: read
+            fields: [venue_id, start_at, end_at, status, late_cancel]
+          - name: booking_events
+            access: read
+            fields: [booking_id, to_status, actor_type]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/reportFrom"
+        - $ref: "#/components/parameters/reportTo"
+      responses:
+        "200":
+          description: 報表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+        "400":
+          description: 日期區間不正確或缺少日期，放在 fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/reports/csv:
+    get:
+      tags: [報表]
+      summary: 匯出報表 CSV
+      operationId: exportReportCsv
+      description: 對應 UI-12「匯出 CSV」。僅管理員。內容與 GET /api/reports 同一區間的 display 字串逐格相同；UTF-8 含 BOM、換行 CRLF；含逗號、雙引號、換行的儲存格以雙引號包住，開頭為 =、+、-、@ 的儲存格前加單引號。欄位依序為場地、使用率、尖峰時段、取消率、逾時取消筆數、未到場率，尖峰時段以「週X HH:00–HH:00」並以分號串接。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: read
+            fields: [id, name, is_active]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: venue_maintenance_windows
+            access: read
+            fields: [venue_id, start_at, end_at]
+          - name: bookings
+            access: read
+            fields: [venue_id, start_at, end_at, status, late_cancel]
+          - name: booking_events
+            access: read
+            fields: [booking_id, to_status, actor_type]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/reportFrom"
+        - $ref: "#/components/parameters/reportTo"
+      responses:
+        "200":
+          description: CSV 檔案
+          headers:
+            Content-Disposition:
+              description: attachment，檔名含查詢區間
+              schema:
+                type: string
+          content:
+            text/csv:
+              schema:
+                type: string
+        "400":
+          description: 日期區間不正確或缺少日期，放在 fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+x-background-jobs:
+  description: |
+    背景排程（API-11）不是 HTTP 操作，由後端行程內的掃描驅動：每 30 秒（SCAN_INTERVAL_MS）執行一輪，若上一輪未完成則略過；「現在」取自可注入的時鐘。每種工作都是「查詢到期列加逐筆處理」：交易內以 FOR UPDATE SKIP LOCKED 取最多 100 列，逐筆經同一個狀態轉換入口（條件更新、寫操作紀錄、釋出時段、通知），單筆失敗只記錄日誌並繼續，處理到沒有到期列為止；所有判斷只看資料庫狀態與時間，行程重啟後第一輪補做所有到期工作，重複執行不會重複處理。自動處理的事件須在到期時間點後 1 分鐘內完成。
+  jobs:
+    - name: expirePendingReviews
+      trigger: 狀態為待審核且開始時間已到（單次預約）；週期性批次以其最早一個未取消場次的開始時間判斷。
+      result: 單次預約改為已取消；整批則所有未取消場次改為已取消、批次狀態（status）改為 cancelled。操作者記為系統，原因「未於開始前完成審核」，不標記逾時取消；釋出時段並對釋出範圍呼叫候補遞補掛勾；通知預約者。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: write
+            fields: [id, user_id, venue_id, start_at, status, series_id]
+          - name: booking_series
+            access: write
+            fields: [id, status]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                id,
+                venue_id,
+                start_at,
+                end_at,
+                status,
+                offer_expires_at,
+                created_at,
+              ]
+          - name: notifications
+            access: write
+            fields:
+              [
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+    - name: markNoShows
+      trigger: 狀態為已確認，且現在已超過報到截止（開始時間加報到截止分鐘，與結束時間取較早者）。
+      result: 改為未到場，操作者記為系統；剩餘時段釋出（保留已過去部分，釋出從判定時間之後的下一個整點或半點起）並呼叫候補遞補掛勾；為預約者記錄一次未到場；在同一交易內鎖使用者列，計算統計天數內且晚於 no_show_counted_from_at 的未到場次數，達門檻時把 suspended_until_at 設為現在加暫停天數、no_show_counted_from_at 設為 suspended_until_at，並通知預約者權限暫停與解除時間。暫停期滿不需工作，以 suspended_until_at 與目前時間比較。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: write
+            fields: [id, user_id, venue_id, start_at, end_at, status]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: booking_events
+            access: read
+            fields: [booking_id, actor_user_id, to_status, occurred_at]
+          - name: users
+            access: write
+            fields: [id, suspended_until_at, no_show_counted_from_at]
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                id,
+                venue_id,
+                start_at,
+                end_at,
+                status,
+                offer_expires_at,
+                created_at,
+              ]
+          - name: notifications
+            access: write
+            fields:
+              [
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                created_at,
+              ]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+    - name: completeCheckedIn
+      trigger: 狀態為已報到且結束時間已到。
+      result: 改為已完成，操作者記為系統；時段列保留到清理工作刪除。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: write
+            fields: [id, end_at, status]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+        files: []
+    - name: sendReminders
+      trigger: 狀態為已確認、尚未提醒（reminder_sent_at 為空）、現在已進入「開始時間減提醒分鐘」之後且開始時間未到，且確認時間不晚於「開始時間減提醒分鐘」（成立時距開始已不足提醒時間者不提醒；待審核不提醒）。
+      result: 通知預約者開始前提醒並寫入 reminder_sent_at；修改時間或場地後重新確認時 confirmed_at 更新且 reminder_sent_at 清空，由本工作重新判斷。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: write
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                status,
+                confirmed_at,
+                reminder_sent_at,
+              ]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, created_at]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+    - name: expireWaitlistOffers
+      trigger: 候補為保留中且保留到期時間已到。
+      result: 候補改為失效（原因 offer_timeout）、刪除保留的時段列，通知候補者失效，並呼叫候補遞補掛勾由下一位接手；若此時距開始已在候補截止門檻內，不再通知下一位，時段開放所有人預約。
+      x-inner-needs:
+        data:
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                status,
+                offer_expires_at,
+                close_reason,
+                closed_at,
+                created_at,
+              ]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, waitlist_entry_id, created_at]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+    - name: expireStartedWaitlist
+      trigger: 候補為等候中或保留中且候補時段的開始時間已到。
+      result: 候補改為失效（原因 started）、刪除保留的時段列，通知候補者失效。
+      x-inner-needs:
+        data:
+          - name: waitlist_entries
+            access: write
+            fields:
+              [id, user_id, venue_id, start_at, status, close_reason, closed_at]
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, waitlist_entry_id, created_at]
+        files: []
+    - name: retryWaitlistOffers
+      trigger: 每一輪對仍在等候中的候補重新跑一次遞補掛勾，作為保險。
+      result: 候補登記時段的所有時段列都已空出且現在早於開始時間減候補截止門檻時，按登記先後把第一順位改為保留中、保留到期時間設為現在加候補確認時限、以 hold 占用時段並通知；對象為預約權限暫停者時直接判為失效（原因 confirm_failed）並處理下一位；部分空出不遞補。
+      x-inner-needs:
+        data:
+          - name: waitlist_entries
+            access: write
+            fields:
+              [
+                id,
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                status,
+                offer_expires_at,
+                close_reason,
+                closed_at,
+                created_at,
+              ]
+          - name: booking_slots
+            access: write
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: users
+            access: read
+            fields: [id, suspended_until_at]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, waitlist_entry_id, created_at]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+    - name: purgeOldSlots
+      trigger: 時段列的 slot_start_at 早於 1 天前。
+      result: 刪除這些時段列（已完成預約的時段列保留到此時）。
+      x-inner-needs:
+        data:
+          - name: booking_slots
+            access: delete
+            fields: [venue_id, slot_start_at]
+        files: []
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: sid
+      description: 登入後由伺服器設定的 HttpOnly 階段憑證
+  responses:
+    Unauthorized:
+      description: 未登入或登入已逾時
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: 沒有權限、必須先改密碼（訊息「請先設定新密碼」），或請求來源不被允許
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  parameters:
+    userId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: integer
+    venueId:
+      name: venueId
+      in: path
+      required: true
+      schema:
+        type: integer
+    windowId:
+      name: windowId
+      in: path
+      required: true
+      schema:
+        type: integer
+    bookingId:
+      name: bookingId
+      in: path
+      required: true
+      schema:
+        type: integer
+    seriesId:
+      name: seriesId
+      in: path
+      required: true
+      schema:
+        type: integer
+    entryId:
+      name: entryId
+      in: path
+      required: true
+      schema:
+        type: integer
+    notificationId:
+      name: notificationId
+      in: path
+      required: true
+      schema:
+        type: integer
+    ruleKey:
+      name: ruleKey
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/RuleKey"
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    offset:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    reportFrom:
+      name: from
+      in: query
+      required: true
+      schema:
+        type: string
+        format: date
+    reportTo:
+      name: to
+      in: query
+      required: true
+      schema:
+        type: string
+        format: date
+  schemas:
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: 繁體中文，說明發生什麼與可以怎麼做，不含內部代碼或技術細節
+          examples:
+            - Email 或密碼錯誤。請確認後再試一次。
+            - 該時段已被占用。請改選其他時段，或登記候補。
+            - 此申請已被處理。清單已更新。
+            - 請先設定新密碼。
+            - 受影響的預約已有變動，尚未停用。請確認最新清單後再試一次。
+        fields:
+          type: array
+          description: 欄位層級的錯誤，供前端標示在欄位下方
+          items:
+            $ref: "#/components/schemas/FieldError"
+        violations:
+          type: array
+          description: 預約相關操作未通過的規則清單，每項含規則代號與說明
+          items:
+            $ref: "#/components/schemas/Violation"
+        conflicts:
+          type: array
+          description: 週期性預約送出時重新檢查發現的最新衝突場次
+          items:
+            $ref: "#/components/schemas/SeriesSessionCheck"
+        impact:
+          description: 兩段式確認時影響範圍已變動，附上最新影響
+          $ref: "#/components/schemas/ImpactPreview"
+    FieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          description: 對應請求欄位名稱，例如 email、capacity、openingHours、reviewerIds、maintenance、reason
+        message:
+          type: string
+    Violation:
+      type: object
+      required: [rule, message]
+      properties:
+        rule:
+          type: string
+          enum:
+            - time_unit
+            - duration
+            - end_not_after_start
+            - past
+            - advance
+            - opening_hours
+            - capacity
+            - occupied
+            - quota
+            - suspended
+            - venue_inactive
+            - series_range
+            - series_pending
+            - started
+            - status
+            - not_in_window
+            - first_session_range
+            - series_max_months
+            - series_quota
+            - no_sessions
+            - slot_free
+            - maintenance
+            - already_waiting
+            - offer_expired
+            - not_offered
+        message:
+          type: string
+          description: 繁體中文，說明未通過的原因與可以怎麼做；暫停與逾時類訊息含解除時間或可報到時間
+    TimeOfDay:
+      type: string
+      pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+      description: 台北當地時間 HH:mm
+    EndTimeOfDay:
+      type: string
+      pattern: "^(([01][0-9]|2[0-3]):[0-5][0-9]|24:00)$"
+      description: 台北當地時間 HH:mm，24:00 表示當日結束
+    Role:
+      type: string
+      enum: [employee, reviewer, admin]
+    CurrentUser:
+      type: object
+      required: [id, name, email, roles, mustChangePassword, suspendedUntil]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+        mustChangePassword:
+          type: boolean
+        suspendedUntil:
+          type: ["string", "null"]
+          format: date-time
+          pattern: "Z$"
+          description: 預約權限暫停解除時間；未暫停或已過期為 null
+    User:
+      type: object
+      required:
+        [id, email, name, roles, active, mustChangePassword, suspendedUntil]
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        name:
+          type: string
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+        active:
+          type: boolean
+        mustChangePassword:
+          type: boolean
+        suspendedUntil:
+          type: ["string", "null"]
+          format: date-time
+          pattern: "Z$"
+    UserList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
+    UserCreateInput:
+      type: object
+      required: [email, name, password, roles]
+      properties:
+        email:
+          type: string
+        name:
+          type: string
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+        roles:
+          type: array
+          description: 額外角色；employee 隱含，傳入也會被忽略
+          items:
+            $ref: "#/components/schemas/Role"
+    UserUpdateInput:
+      type: object
+      required: [name, roles]
+      properties:
+        name:
+          type: string
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+    Context:
+      type: object
+      required: [now, today, maxBookableDate, rules]
+      properties:
+        now:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 伺服器目前時間（UTC）
+        today:
+          type: string
+          format: date
+          description: 目前台北日期
+        maxBookableDate:
+          type: string
+          format: date
+          description: 今天起算最遠可預約日期（含）
+        rules:
+          $ref: "#/components/schemas/RuleValues"
+    RuleValues:
+      type: object
+      description: 規則目前值，一律以儲存單位表示（時間類為分鐘）
+      required:
+        [
+          maxDurationMinutes,
+          maxAdvanceDays,
+          maxActiveBookings,
+          maxActiveSeries,
+          maxSeriesMonths,
+          lateCancelMinutes,
+          waitlistConfirmMinutes,
+          waitlistCutoffMinutes,
+          checkinOpenMinutes,
+          checkinCloseMinutes,
+        ]
+      properties:
+        maxDurationMinutes:
+          type: integer
+        maxAdvanceDays:
+          type: integer
+        maxActiveBookings:
+          type: integer
+        maxActiveSeries:
+          type: integer
+        maxSeriesMonths:
+          type: integer
+        lateCancelMinutes:
+          type: integer
+        waitlistConfirmMinutes:
+          type: integer
+        waitlistCutoffMinutes:
+          type: integer
+        checkinOpenMinutes:
+          type: integer
+        checkinCloseMinutes:
+          type: integer
+    ImpactBooking:
+      type: object
+      required:
+        [bookingId, bookerName, venueName, date, startTime, endTime, status]
+      properties:
+        bookingId:
+          type: integer
+        bookerName:
+          type: string
+        venueName:
+          type: string
+        date:
+          type: string
+          format: date
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        status:
+          $ref: "#/components/schemas/BookingStatus"
+    ImpactPreview:
+      type: object
+      required: [bookings, waitlistCount]
+      properties:
+        bookings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImpactBooking"
+        waitlistCount:
+          type: integer
+          description: 會失效的候補數；維護時段預覽恆為 0
+    ImpactConfirmInput:
+      type: object
+      required: [bookingIds]
+      properties:
+        bookingIds:
+          type: array
+          description: 管理員在預覽中看過的預約識別；伺服器重算後必須完全一致
+          items:
+            type: integer
+    ImpactResult:
+      type: object
+      required: [cancelledBookingCount, expiredWaitlistCount]
+      properties:
+        cancelledBookingCount:
+          type: integer
+        expiredWaitlistCount:
+          type: integer
+    OpeningHour:
+      type: object
+      required: [weekday, startTime, endTime]
+      properties:
+        weekday:
+          type: integer
+          minimum: 0
+          maximum: 6
+          description: 0 為週日
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+    ReviewerRef:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+    Venue:
+      type: object
+      required:
+        [
+          id,
+          name,
+          location,
+          capacity,
+          equipment,
+          requiresApproval,
+          openingHours,
+        ]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        location:
+          type: string
+        capacity:
+          type: integer
+        equipment:
+          type: array
+          items:
+            type: string
+        requiresApproval:
+          type: boolean
+        openingHours:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpeningHour"
+    VenueList:
+      type: object
+      required: [items, equipmentOptions]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Venue"
+        equipmentOptions:
+          type: array
+          description: 啟用中場地出現過的設備名稱，去重後排序
+          items:
+            type: string
+    AdminVenue:
+      allOf:
+        - $ref: "#/components/schemas/Venue"
+        - type: object
+          required: [active, reviewers]
+          properties:
+            active:
+              type: boolean
+            reviewers:
+              type: array
+              items:
+                $ref: "#/components/schemas/ReviewerRef"
+    AdminVenueList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminVenue"
+    VenueInput:
+      type: object
+      required:
+        [
+          name,
+          location,
+          capacity,
+          equipment,
+          requiresApproval,
+          reviewerIds,
+          openingHours,
+        ]
+      properties:
+        name:
+          type: string
+        location:
+          type: string
+        capacity:
+          type: integer
+          minimum: 1
+        equipment:
+          type: array
+          items:
+            type: string
+        requiresApproval:
+          type: boolean
+        reviewerIds:
+          type: array
+          description: 審核者帳號識別；requiresApproval 為 true 時至少一位
+          items:
+            type: integer
+        openingHours:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpeningHour"
+    Calendar:
+      type: object
+      required: [venue, today, view, from, to, days]
+      properties:
+        venue:
+          type: object
+          required: [id, name, location]
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            location:
+              type: string
+        today:
+          type: string
+          format: date
+          description: 目前台北日期
+        view:
+          type: string
+          enum: [day, week]
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
+        days:
+          type: array
+          items:
+            $ref: "#/components/schemas/CalendarDay"
+    CalendarDay:
+      type: object
+      required: [date, weekday, openRanges, slots]
+      properties:
+        date:
+          type: string
+          format: date
+        weekday:
+          type: integer
+          minimum: 0
+          maximum: 6
+        openRanges:
+          type: array
+          description: 該日的開放區間（不扣除已過去與超過最遠可預約日的部分）；空陣列表示整天不開放
+          items:
+            type: object
+            required: [startTime, endTime]
+            properties:
+              startTime:
+                $ref: "#/components/schemas/TimeOfDay"
+              endTime:
+                $ref: "#/components/schemas/EndTimeOfDay"
+        slots:
+          type: array
+          description: 48 個 30 分鐘時段，由 00:00 起
+          items:
+            $ref: "#/components/schemas/CalendarSlot"
+    CalendarSlot:
+      type: object
+      required: [startTime, endTime, status]
+      properties:
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        status:
+          type: string
+          enum: [available, booked, maintenance, closed]
+          description: 可預約、已預約（含候補保留）、維護中、不開放（含已過去與超過最遠可預約日）
+    MaintenanceInput:
+      type: object
+      required: [startDate, startTime, endDate, endTime]
+      properties:
+        startDate:
+          type: string
+          format: date
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endDate:
+          type: string
+          format: date
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        excludeWindowId:
+          type: integer
+          description: 僅影響預覽：編輯既有維護時段時排除自己
+    MaintenanceConfirmInput:
+      allOf:
+        - $ref: "#/components/schemas/MaintenanceInput"
+        - type: object
+          required: [bookingIds]
+          properties:
+            bookingIds:
+              type: array
+              description: 管理員在預覽中看過的預約識別；沒有受影響預約時為空陣列
+              items:
+                type: integer
+    MaintenanceWindow:
+      type: object
+      required:
+        [id, venueId, startDate, startTime, endDate, endTime, startAt, endAt]
+      properties:
+        id:
+          type: integer
+        venueId:
+          type: integer
+        startDate:
+          type: string
+          format: date
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endDate:
+          type: string
+          format: date
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        startAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+        endAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+    MaintenanceWindowList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MaintenanceWindow"
+    MaintenanceResult:
+      type: object
+      required: [window, cancelledBookingCount]
+      properties:
+        window:
+          $ref: "#/components/schemas/MaintenanceWindow"
+        cancelledBookingCount:
+          type: integer
+    BookingStatus:
+      type: string
+      enum:
+        [
+          pending,
+          confirmed,
+          checked_in,
+          completed,
+          rejected,
+          cancelled,
+          no_show,
+        ]
+      description: 待審核、已確認、已報到、已完成、已駁回、已取消、未到場
+    BookingInput:
+      type: object
+      required: [venueId, date, startTime, endTime, subject, attendees]
+      properties:
+        venueId:
+          type: integer
+        date:
+          type: string
+          format: date
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        subject:
+          type: string
+          maxLength: 100
+        attendees:
+          type: integer
+          minimum: 1
+    Booking:
+      type: object
+      required:
+        [
+          id,
+          venueId,
+          venueName,
+          date,
+          startTime,
+          endTime,
+          startAt,
+          endAt,
+          subject,
+          attendees,
+          status,
+          lateCancel,
+        ]
+      properties:
+        id:
+          type: integer
+        venueId:
+          type: integer
+        venueName:
+          type: string
+        date:
+          type: string
+          format: date
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        startAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+        endAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+        subject:
+          type: string
+        attendees:
+          type: integer
+        status:
+          $ref: "#/components/schemas/BookingStatus"
+        lateCancel:
+          type: boolean
+    SeriesStatus:
+      type: string
+      enum: [pending, confirmed, rejected, cancelled]
+      description: |
+        週期性預約批次狀態代碼（C-SH-01），與預約狀態共用同一組英文 snake_case 代碼：pending 待審核（整批尚未審核）、confirmed 已確認（整批審核通過，或不需審核的場地直接成立）、rejected 已駁回（整批被駁回）、cancelled 已取消（整批所有場次皆已取消，含未於開始前完成審核而由系統取消）。批次沒有 checked_in、completed、no_show：報到、完成與未到場由各場次各自判定（FR-057）。
+    SeriesInfo:
+      type: object
+      required: [seriesId, index, total, lastDate, status, pendingApproval]
+      properties:
+        seriesId:
+          type: integer
+        status:
+          $ref: "#/components/schemas/SeriesStatus"
+        index:
+          type: integer
+          description: 第 n 場（從 1 起）
+        total:
+          type: integer
+          description: 該批原有總場次數（含已取消）
+        lastDate:
+          type: string
+          format: date
+          description: 同批最後一場日期
+        pendingApproval:
+          type: boolean
+          description: 整批是否仍待審核；恆等於 status 為 pending
+    MyBooking:
+      allOf:
+        - $ref: "#/components/schemas/Booking"
+        - type: object
+          required:
+            [
+              series,
+              statusReason,
+              statusActor,
+              canCancel,
+              canEdit,
+              editBlockedReason,
+              canCheckIn,
+              checkInWindow,
+            ]
+          properties:
+            series:
+              oneOf:
+                - $ref: "#/components/schemas/SeriesInfo"
+                - type: "null"
+            statusReason:
+              type: ["string", "null"]
+              description: 駁回或取消的原因（最近一次轉為已駁回、已取消的紀錄）
+            statusActor:
+              type: ["string", "null"]
+              enum: [user, reviewer, admin, system, null]
+              description: 駁回或取消的操作者類型（user 為本人）
+            canCancel:
+              type: boolean
+              description: 待審核或已確認且尚未開始
+            canEdit:
+              type: boolean
+              description: 待審核或已確認、尚未開始，且不是整批仍待審核的場次
+            editBlockedReason:
+              type: ["string", "null"]
+              enum: [series_pending, started, status, null]
+              description: canEdit 為 false 時的原因
+            canCheckIn:
+              type: boolean
+              description: 已確認且目前在報到時間內
+            checkInWindow:
+              oneOf:
+                - type: object
+                  required: [startAt, endAt]
+                  properties:
+                    startAt:
+                      type: string
+                      format: date-time
+                      pattern: "Z$"
+                    endAt:
+                      type: string
+                      format: date-time
+                      pattern: "Z$"
+                - type: "null"
+              description: 已確認時的可報到起訖（報到截止晚於結束時間時以結束時間為準）
+    MyBookingList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MyBooking"
+        total:
+          type: integer
+    CancelResult:
+      type: object
+      required: [cancelledCount, cancelled]
+      properties:
+        cancelledCount:
+          type: integer
+        cancelled:
+          type: array
+          items:
+            type: object
+            required: [id, lateCancel]
+            properties:
+              id:
+                type: integer
+              lateCancel:
+                type: boolean
+    AdminBooking:
+      allOf:
+        - $ref: "#/components/schemas/Booking"
+        - type: object
+          required:
+            [bookerId, bookerName, seriesIndex, seriesTotal, canAdminCancel]
+          properties:
+            bookerId:
+              type: integer
+            bookerName:
+              type: string
+            seriesIndex:
+              type: ["integer", "null"]
+            seriesTotal:
+              type: ["integer", "null"]
+            canAdminCancel:
+              type: boolean
+              description: 待審核或已確認且尚未開始
+    AdminBookingList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminBooking"
+        total:
+          type: integer
+    BookingEvent:
+      type: object
+      required:
+        [id, occurredAt, actorName, actorType, fromStatus, toStatus, reason]
+      properties:
+        id:
+          type: integer
+        occurredAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+        actorName:
+          type: ["string", "null"]
+          description: 系統自動處理為 null
+        actorType:
+          type: string
+          enum: [user, reviewer, admin, system]
+        fromStatus:
+          oneOf:
+            - $ref: "#/components/schemas/BookingStatus"
+            - type: "null"
+          description: 預約建立時為 null
+        toStatus:
+          $ref: "#/components/schemas/BookingStatus"
+        reason:
+          type: ["string", "null"]
+    BookingEventList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/BookingEvent"
+    ReviewSession:
+      type: object
+      required: [bookingId, date, startTime, endTime]
+      properties:
+        bookingId:
+          type: integer
+        date:
+          type: string
+          format: date
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+    ReviewItem:
+      type: object
+      required:
+        [
+          kind,
+          id,
+          applicantName,
+          venueId,
+          venueName,
+          date,
+          startTime,
+          endTime,
+          subject,
+          attendees,
+          assignedToAdmin,
+        ]
+      properties:
+        kind:
+          type: string
+          enum: [booking, series]
+          description: booking 以 bookingId 審核，series 以 seriesId 審核
+        id:
+          type: integer
+          description: kind 為 booking 時是預約識別，為 series 時是批次識別
+        applicantName:
+          type: string
+        venueId:
+          type: integer
+        venueName:
+          type: string
+        date:
+          type: string
+          format: date
+          description: 單筆為預約日期，整批為第一個未取消場次的日期
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        subject:
+          type: string
+        attendees:
+          type: integer
+        assignedToAdmin:
+          type: boolean
+          description: 因申請者是該場地唯一審核者而交由管理員審核
+        frequency:
+          type: string
+          enum: [weekly, biweekly]
+          description: 僅整批
+        sessions:
+          type: array
+          description: 僅整批，未取消的場次由早到晚
+          items:
+            $ref: "#/components/schemas/ReviewSession"
+    ReviewList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReviewItem"
+    RejectInput:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          description: 駁回原因，必填、非空白
+    ReviewResult:
+      type: object
+      required: [status, affectedCount]
+      properties:
+        status:
+          type: string
+          enum: [confirmed, rejected]
+          description: 審核後的預約狀態代碼（單筆為 bookings.status，整批為 booking_series.status），為 BookingStatus 與 SeriesStatus 共有代碼的子集
+        affectedCount:
+          type: integer
+          description: 受影響的場次數，單筆為 1
+    Frequency:
+      type: string
+      enum: [weekly, biweekly]
+      description: 每週（間隔 7 天）、每兩週（間隔 14 天）
+    SeriesInput:
+      allOf:
+        - $ref: "#/components/schemas/BookingInput"
+        - type: object
+          required: [frequency, lastDate]
+          properties:
+            frequency:
+              $ref: "#/components/schemas/Frequency"
+            lastDate:
+              type: string
+              format: date
+              description: 最後一場日期；date 為第一場日期
+    SeriesCreateInput:
+      allOf:
+        - $ref: "#/components/schemas/SeriesInput"
+        - type: object
+          required: [skipDates]
+          properties:
+            skipDates:
+              type: array
+              description: 使用者確認略過的場次日期；無則空陣列
+              items:
+                type: string
+                format: date
+    SeriesSessionCheck:
+      type: object
+      required: [date, weekday, startTime, endTime, available, reasons]
+      properties:
+        date:
+          type: string
+          format: date
+        weekday:
+          type: integer
+          minimum: 0
+          maximum: 6
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        available:
+          type: boolean
+        reasons:
+          type: array
+          description: 衝突原因：occupied 時段已被占用、maintenance 維護中、closed 不在開放時段內
+          items:
+            type: string
+            enum: [occupied, maintenance, closed]
+    SeriesPreview:
+      type: object
+      required: [sessions, availableCount, conflictCount]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/SeriesSessionCheck"
+        availableCount:
+          type: integer
+        conflictCount:
+          type: integer
+    SeriesCreated:
+      type: object
+      required: [seriesId, status, sessionCount, bookings]
+      properties:
+        seriesId:
+          type: integer
+        status:
+          $ref: "#/components/schemas/SeriesStatus"
+        # 建立當下只會是 pending 或 confirmed
+        # 需審核的場地為 pending，否則 confirmed
+        sessionCount:
+          type: integer
+        bookings:
+          type: array
+          items:
+            $ref: "#/components/schemas/Booking"
+    WaitlistEntry:
+      type: object
+      required:
+        [
+          id,
+          venueId,
+          venueName,
+          date,
+          startTime,
+          endTime,
+          subject,
+          attendees,
+          createdAt,
+          status,
+          position,
+          offerExpiresAt,
+          closeReason,
+          bookingId,
+        ]
+      properties:
+        id:
+          type: integer
+        venueId:
+          type: integer
+        venueName:
+          type: string
+        date:
+          type: string
+          format: date
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        subject:
+          type: string
+        attendees:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+        status:
+          type: string
+          enum: [waiting, offered, confirmed, expired, cancelled]
+          description: 等候中、保留中、已遞補成立、已失效、已取消
+        position:
+          type: ["integer", "null"]
+          description: 等候中與保留中的目前順位（保留中為排在最前的人），其他狀態為 null
+        offerExpiresAt:
+          type: ["string", "null"]
+          format: date-time
+          pattern: "Z$"
+          description: 保留中的保留到期時間
+        closeReason:
+          type: ["string", "null"]
+          enum:
+            [
+              offer_timeout,
+              confirm_failed,
+              declined,
+              venue_disabled,
+              account_disabled,
+              started,
+              cancelled,
+              null,
+            ]
+          description: 失效或取消的原因：逾時未確認、確認失敗、主動放棄、場地停用、帳號停用、時段已開始、已取消
+        bookingId:
+          type: ["integer", "null"]
+          description: 已遞補成立時的預約識別
+    WaitlistList:
+      type: object
+      required: [items, recent]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WaitlistEntry"
+        recent:
+          type: array
+          items:
+            $ref: "#/components/schemas/WaitlistEntry"
+    Notification:
+      type: object
+      required: [id, type, message, createdAt, read, bookingId, waitlistEntryId]
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+          enum:
+            [
+              booking_created,
+              review_result,
+              waitlist_offer,
+              booking_cancelled,
+              review_pending,
+              booking_changed,
+              suspension,
+              waitlist_expired,
+              reminder,
+            ]
+          description: 預約成立、審核結果、候補遞補、預約取消、待審核、預約修改、權限暫停、候補失效、開始前提醒
+        message:
+          type: string
+          description: 事件發生當下組成的繁體中文內容，時間為台北時間
+        createdAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+        read:
+          type: boolean
+        bookingId:
+          type: ["integer", "null"]
+        waitlistEntryId:
+          type: ["integer", "null"]
+    NotificationList:
+      type: object
+      required: [items, total, unreadCount]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Notification"
+        total:
+          type: integer
+        unreadCount:
+          type: integer
+    NotificationReadResult:
+      type: object
+      required: [notification, unreadCount]
+      properties:
+        notification:
+          $ref: "#/components/schemas/Notification"
+        unreadCount:
+          type: integer
+    RuleKey:
+      type: string
+      enum:
+        - max_duration_minutes
+        - max_advance_days
+        - max_active_bookings
+        - max_active_series
+        - max_series_months
+        - late_cancel_minutes
+        - waitlist_confirm_minutes
+        - waitlist_cutoff_minutes
+        - checkin_open_minutes
+        - checkin_close_minutes
+        - no_show_window_days
+        - no_show_threshold
+        - suspend_days
+        - reminder_minutes
+    Rule:
+      type: object
+      required: [key, name, value, unit]
+      properties:
+        key:
+          $ref: "#/components/schemas/RuleKey"
+        name:
+          type: string
+          description: 單次時長上限、最遠可預約天數、每人有效預約上限、每人週期性預約批數上限、週期性預約最長月數、逾時取消門檻、候補確認時限、候補截止門檻、報到開放時間、報到截止時間、未到場統計天數、未到場次數門檻、暫停天數、開始前提醒時間
+        value:
+          type: integer
+          description: 以 unit 表示的目前值
+        unit:
+          type: string
+          enum: [hours, days, count, batches, months, minutes, times]
+          description: 小時、天、筆、批、個月、分鐘、次
+    RuleList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Rule"
+    RuleChange:
+      type: object
+      required:
+        [id, ruleKey, ruleName, unit, actorName, changedAt, oldValue, newValue]
+      properties:
+        id:
+          type: integer
+        ruleKey:
+          $ref: "#/components/schemas/RuleKey"
+        ruleName:
+          type: string
+        unit:
+          type: string
+          enum: [hours, days, count, batches, months, minutes, times]
+        actorName:
+          type: string
+        changedAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+        oldValue:
+          type: integer
+        newValue:
+          type: integer
+    RuleChangeList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuleChange"
+        total:
+          type: integer
+    Metric:
+      type: object
+      required: [value, display]
+      properties:
+        value:
+          type: ["number", "null"]
+          description: 百分比（四捨五入到小數點後 1 位）；分母為 0 時為 null
+        display:
+          type: string
+          description: 畫面與 CSV 顯示字串，例如 25%、33.3%、無資料
+    PeakSlot:
+      type: object
+      required: [weekday, hour, display]
+      properties:
+        weekday:
+          type: integer
+          minimum: 0
+          maximum: 6
+        hour:
+          type: integer
+          minimum: 0
+          maximum: 23
+        display:
+          type: string
+          description: 週X HH:00–HH+1:00
+    ReportVenue:
+      type: object
+      required:
+        [
+          venueId,
+          venueName,
+          active,
+          utilization,
+          peakSlots,
+          peakDisplay,
+          cancellation,
+          lateCancelCount,
+          noShow,
+        ]
+      properties:
+        venueId:
+          type: integer
+        venueName:
+          type: string
+        active:
+          type: boolean
+        utilization:
+          $ref: "#/components/schemas/Metric"
+        peakSlots:
+          type: array
+          description: 前 3 名；沒有資料為空陣列
+          items:
+            $ref: "#/components/schemas/PeakSlot"
+        peakDisplay:
+          type: string
+          description: 尖峰時段的顯示字串（以分號串接）；沒有資料為「無資料」
+        cancellation:
+          $ref: "#/components/schemas/Metric"
+        lateCancelCount:
+          type: integer
+        noShow:
+          $ref: "#/components/schemas/Metric"
+    Report:
+      type: object
+      required: [from, to, venues]
+      properties:
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
+        venues:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReportVenue"

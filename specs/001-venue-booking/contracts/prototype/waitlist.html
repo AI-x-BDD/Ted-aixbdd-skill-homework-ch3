@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>我的候補</title>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script src="waitlist-dialog.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("waitlist.html");
+        var items = [
+          {
+            id: "w1",
+            venue: "大會議室",
+            date: "2026-11-13",
+            s: "10:00",
+            e: "11:00",
+            subject: "季度檢討",
+            n: 12,
+            at: "2026-11-05 09:12",
+            status: "保留中",
+            until: "2026-11-07 14:25",
+            approval: true,
+          },
+          {
+            id: "w2",
+            venue: "201 會議室",
+            date: "2026-11-09",
+            s: "10:00",
+            e: "11:00",
+            subject: "客戶訪談",
+            n: 5,
+            at: "2026-11-06 16:40",
+            status: "等候中",
+            rank: 2,
+          },
+          {
+            id: "w3",
+            venue: "培訓教室",
+            date: "2026-11-18",
+            s: "13:00",
+            e: "17:00",
+            subject: "主管訓練",
+            n: 20,
+            at: "2026-11-06 11:03",
+            status: "等候中",
+            rank: 1,
+          },
+          {
+            id: "w4",
+            venue: "小型討論室 A",
+            date: "2026-11-08",
+            s: "09:00",
+            e: "10:00",
+            subject: "一對一",
+            n: 2,
+            at: "2026-11-04 15:20",
+            status: "已失效",
+            why: "逾時未確認",
+          },
+        ];
+        var root = h("div", { tid: "waitlist-page" });
+        main.appendChild(root);
+        root.appendChild(
+          h(
+            "div",
+            { class: "row", style: "justify-content:space-between" },
+            P.header("我的候補"),
+            h("button", {
+              class: "btn primary",
+              tid: "waitlist-register-open",
+              text: "登記候補",
+              onclick: function (e) {
+                P.waitlistDialog({}, e.target);
+              },
+            }),
+          ),
+        );
+        if (q.get("suspended") === "1") root.appendChild(P.suspension());
+        var notice = h("div", {
+          tid: "waitlist-notice",
+          "aria-live": "polite",
+        });
+        root.appendChild(notice);
+        var out = h("div");
+        root.appendChild(out);
+
+        function say(kind, text, link) {
+          notice.innerHTML = "";
+          var box = h(
+            "div",
+            {
+              class: "alert " + (kind === "error" ? "danger" : "ok"),
+              role: kind === "error" ? "alert" : "status",
+            },
+            text,
+          );
+          if (link)
+            box.appendChild(
+              h(
+                "div",
+                null,
+                h("a", {
+                  class: "btn sm",
+                  href: P.link("bookings.html"),
+                  text: "前往我的預約",
+                }),
+              ),
+            );
+          notice.appendChild(box);
+        }
+        function item(w) {
+          var li = h("li", {
+            class: "item" + (w.status === "已失效" ? " muted" : ""),
+            tid: "waitlist-item",
+            "data-id": w.id,
+            "aria-label":
+              w.venue +
+              "，" +
+              P.fmtDate(w.date) +
+              " " +
+              w.s +
+              "–" +
+              w.e +
+              "，" +
+              w.status +
+              (w.rank ? "，第 " + w.rank + " 順位" : ""),
+          });
+          li.appendChild(
+            h(
+              "div",
+              { class: "top" },
+              h("span", { class: "title", text: w.venue }),
+              h("span", {
+                class:
+                  "tag " +
+                  (w.status === "保留中"
+                    ? "ok"
+                    : w.status === "已失效"
+                      ? "danger"
+                      : "accent"),
+                text:
+                  w.status === "等候中"
+                    ? "等候中｜第 " + w.rank + " 順位"
+                    : w.status,
+              }),
+            ),
+          );
+          li.appendChild(
+            h("div", {
+              class: "meta",
+              text:
+                P.fmtDate(w.date) +
+                " " +
+                w.s +
+                "–" +
+                w.e +
+                "｜" +
+                w.subject +
+                "，" +
+                w.n +
+                " 人",
+            }),
+          );
+          li.appendChild(
+            h("div", { class: "meta", text: "登記時間：" + w.at }),
+          );
+          if (w.status === "保留中") {
+            li.appendChild(
+              h("div", {
+                class: "alert warn",
+                style: "margin:0",
+                text:
+                  "時段已為你保留，請在 " +
+                  w.until.replace("2026-11-07 ", "2026年11月7日（週六）") +
+                  " 前確認。",
+              }),
+            );
+            li.appendChild(
+              h(
+                "div",
+                { class: "row" },
+                h("button", {
+                  class: "btn primary sm",
+                  tid: "waitlist-confirm-button",
+                  text: "確認遞補",
+                  onclick: function (e) {
+                    confirmIt(w, e.target);
+                  },
+                }),
+                h("button", {
+                  class: "btn sm",
+                  tid: "waitlist-decline-button",
+                  text: "放棄遞補",
+                  onclick: function () {
+                    w.status = "已失效";
+                    w.why = "已放棄";
+                    say("ok", "已放棄遞補，系統會改通知下一位。");
+                    draw();
+                  },
+                }),
+              ),
+            );
+          }
+          if (w.status === "等候中")
+            li.appendChild(
+              h(
+                "div",
+                { class: "row" },
+                h("button", {
+                  class: "btn sm",
+                  tid: "waitlist-cancel-button",
+                  text: "取消候補",
+                  onclick: function (e) {
+                    cancelDlg(w, e.target);
+                  },
+                }),
+              ),
+            );
+          if (w.status === "已失效")
+            li.appendChild(
+              h("div", { class: "meta", text: "失效原因：" + w.why }),
+            );
+          return li;
+        }
+        function confirmIt(w, btn) {
+          btn.disabled = true;
+          btn.textContent = "處理中…";
+          setTimeout(function () {
+            var f = q.get("fail");
+            if (f === "limit") {
+              w.status = "已失效";
+              w.why = "確認失敗";
+              say(
+                "error",
+                "無法確認遞補：你已達預約持有上限。這個候補已失效，系統會改通知下一位。",
+              );
+            } else if (f === "suspended") {
+              w.status = "已失效";
+              w.why = "確認失敗";
+              say(
+                "error",
+                "無法確認遞補：你的預約權限已暫停至 2026年11月14日（週六）10:30。這個候補已失效，系統會改通知下一位。",
+              );
+            } else if (f === "expired") {
+              w.status = "已失效";
+              w.why = "逾時未確認";
+              say(
+                "error",
+                "保留時間已過，這個候補已失效。你可以重新登記候補。",
+              );
+            } else {
+              w.status = "已遞補成立";
+              say(
+                "ok",
+                w.approval
+                  ? "遞補成功，預約申請已送出，等待審核（待審核）。"
+                  : "遞補成功，預約已成立（已確認）。",
+                true,
+              );
+            }
+            draw();
+          }, 500);
+        }
+        var cdlg = null;
+        function cancelDlg(w, trigger) {
+          if (cdlg) cdlg.el.remove();
+          cdlg = P.confirm(
+            "waitlist-cancel-dialog",
+            "要取消這個候補嗎？",
+            "取消後會退出排序，後面的順位會依序往前。",
+            "確定取消",
+            "先不要取消",
+            function () {
+              items = items.filter(function (x) {
+                return x !== w;
+              });
+              items.forEach(function (x) {
+                if (x.status === "等候中" && x.rank > w.rank) x.rank--;
+              });
+              say("ok", "已取消候補。");
+              draw();
+            },
+            true,
+          );
+          cdlg.open(trigger);
+        }
+        document.addEventListener("waitlist:registered", function () {
+          items.push({
+            id: "w" + (items.length + 1),
+            venue: "大會議室",
+            date: "2026-11-20",
+            s: "09:00",
+            e: "10:00",
+            subject: "新登記",
+            n: 6,
+            at: "2026-11-07 14:00",
+            status: "等候中",
+            rank: 2,
+          });
+          draw();
+        });
+
+        function draw() {
+          out.innerHTML = "";
+          if (P.state === "loading") {
+            out.setAttribute("aria-busy", "true");
+            out.appendChild(P.skeleton(3, "waitlist-page-loading"));
+            return;
+          }
+          out.removeAttribute("aria-busy");
+          if (P.state === "error") {
+            out.appendChild(
+              P.stateBox(
+                "error",
+                "waitlist-page-error",
+                "無法載入你的候補",
+                "無法載入你的候補。請稍後按「重新載入」再試一次。",
+                [P.reloadBtn()],
+              ),
+            );
+            return;
+          }
+          var active = items
+            .filter(function (w) {
+              return w.status === "保留中" || w.status === "等候中";
+            })
+            .sort(function (a, b) {
+              return a.status === b.status
+                ? a.at < b.at
+                  ? -1
+                  : 1
+                : a.status === "保留中"
+                  ? -1
+                  : 1;
+            });
+          var dead = items.filter(function (w) {
+            return w.status === "已失效";
+          });
+          if (P.state === "empty") {
+            active = [];
+            dead = [];
+          }
+          if (!active.length) {
+            out.appendChild(
+              P.stateBox(
+                "empty",
+                "waitlist-page-empty",
+                "目前沒有候補",
+                "在行事曆點選「已預約」的時段，就能登記候補。",
+                [
+                  h(
+                    "div",
+                    { class: "row", style: "justify-content:center" },
+                    h("button", {
+                      class: "btn primary",
+                      text: "登記候補",
+                      onclick: function (e) {
+                        P.waitlistDialog({}, e.target);
+                      },
+                    }),
+                    h("a", {
+                      class: "btn",
+                      href: P.link("venues.html"),
+                      text: "查詢場地",
+                    }),
+                  ),
+                ],
+              ),
+            );
+          } else {
+            var ul = h("ul", { class: "list", tid: "waitlist-list" });
+            active.forEach(function (w) {
+              ul.appendChild(item(w));
+            });
+            out.appendChild(ul);
+          }
+          if (dead.length) {
+            var d = h(
+              "details",
+              { style: "margin-top:16px" },
+              h("summary", {
+                style:
+                  "min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:700",
+                text: "已失效的候補",
+              }),
+            );
+            var ul2 = h("ul", { class: "list" });
+            dead.forEach(function (w) {
+              ul2.appendChild(item(w));
+            });
+            d.appendChild(ul2);
+            out.appendChild(d);
+          }
+        }
+        draw();
+      })();
+    </script>
+  </body>
+</html>

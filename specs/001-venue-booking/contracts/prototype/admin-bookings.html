@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>全部預約</title>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("admin-bookings.html", "admin");
+        if (!main) return;
+        var data = [
+          {
+            id: "a1",
+            user: "陳小明",
+            venue: "201 會議室",
+            date: "2026-11-09",
+            s: "10:00",
+            e: "11:00",
+            subject: "週會",
+            n: 6,
+            status: "confirmed",
+            cancel: true,
+            log: [
+              [
+                "2026-11-06 15:20",
+                "陳小明",
+                "（新建）",
+                "confirmed",
+                "預約成立",
+              ],
+            ],
+          },
+          {
+            id: "a2",
+            user: "吳雅婷",
+            venue: "培訓教室",
+            date: "2026-11-17",
+            s: "13:00",
+            e: "17:00",
+            subject: "新人訓練課程",
+            n: 25,
+            status: "pending",
+            cancel: true,
+            series: [1, 4],
+            log: [
+              [
+                "2026-11-06 09:30",
+                "吳雅婷",
+                "（新建）",
+                "pending",
+                "預約申請送出",
+              ],
+            ],
+          },
+          {
+            id: "a3",
+            user: "黃大同",
+            venue: "大會議室",
+            date: "2026-11-12",
+            s: "16:00",
+            e: "17:00",
+            subject: "專案檢討",
+            n: 10,
+            status: "confirmed",
+            cancel: true,
+            log: [
+              [
+                "2026-11-05 10:00",
+                "黃大同",
+                "（新建）",
+                "pending",
+                "預約申請送出",
+              ],
+              [
+                "2026-11-05 11:30",
+                "林審核",
+                "pending",
+                "confirmed",
+                "審核通過",
+              ],
+            ],
+          },
+          {
+            id: "a4",
+            user: "陳小明",
+            venue: "201 會議室",
+            date: "2026-10-30",
+            s: "09:00",
+            e: "10:00",
+            subject: "專案同步",
+            n: 5,
+            status: "cancelled",
+            late: true,
+            log: [
+              [
+                "2026-10-28 14:00",
+                "陳小明",
+                "（新建）",
+                "confirmed",
+                "預約成立",
+              ],
+              [
+                "2026-10-30 08:20",
+                "陳小明",
+                "confirmed",
+                "cancelled",
+                "逾時取消",
+              ],
+            ],
+          },
+          {
+            id: "a5",
+            user: "李小華",
+            venue: "小型討論室 A",
+            date: "2026-11-04",
+            s: "10:00",
+            e: "11:00",
+            subject: "設計討論",
+            n: 3,
+            status: "no_show",
+            log: [
+              [
+                "2026-11-01 16:00",
+                "李小華",
+                "（新建）",
+                "confirmed",
+                "預約成立",
+              ],
+              [
+                "2026-11-04 10:15",
+                "系統",
+                "confirmed",
+                "no_show",
+                "報到時間結束仍未報到",
+              ],
+            ],
+          },
+          {
+            id: "a6",
+            user: "周美玲",
+            venue: "大會議室",
+            date: "2026-11-03",
+            s: "13:00",
+            e: "14:00",
+            subject: "客戶來訪",
+            n: 8,
+            status: "cancelled",
+            log: [
+              [
+                "2026-11-01 09:00",
+                "周美玲",
+                "（新建）",
+                "confirmed",
+                "預約成立",
+              ],
+              [
+                "2026-11-02 17:10",
+                "王管理",
+                "confirmed",
+                "cancelled",
+                "場地臨時維護",
+              ],
+            ],
+          },
+        ];
+        var more = [
+          {
+            id: "a7",
+            user: "陳小明",
+            venue: "培訓教室",
+            date: "2026-10-28",
+            s: "13:00",
+            e: "15:00",
+            subject: "新人訓練",
+            n: 25,
+            status: "completed",
+            log: [
+              [
+                "2026-10-20 09:00",
+                "陳小明",
+                "（新建）",
+                "confirmed",
+                "預約成立",
+              ],
+              ["2026-10-28 13:00", "陳小明", "confirmed", "checked_in", "報到"],
+              [
+                "2026-10-28 15:00",
+                "系統",
+                "checked_in",
+                "completed",
+                "結束時間到達",
+              ],
+            ],
+          },
+        ];
+        var shown = false;
+        var root = h("div", { tid: "admin-bookings" });
+        main.appendChild(root);
+        root.appendChild(P.header("全部預約"));
+        var f = {
+          from: h("input", { tid: "admin-bookings-filter-from", type: "date" }),
+          to: h("input", { tid: "admin-bookings-filter-to", type: "date" }),
+          venue: P.select(
+            "admin-bookings-filter-venue",
+            "",
+            [["", "全部場地"]].concat(
+              P.VENUES.map(function (v) {
+                return [v.name, v.name];
+              }),
+            ),
+          ),
+          status: P.select(
+            "admin-bookings-filter-status",
+            "",
+            [["", "全部狀態"]].concat(
+              Object.keys(P.STATUS).map(function (c) {
+                return [c, P.statusText(c)];
+              }),
+            ),
+          ),
+          kw: h("input", {
+            tid: "admin-bookings-filter-keyword",
+            type: "search",
+          }),
+        };
+        var form = h("form", {
+          class: "card",
+          novalidate: true,
+          style: "margin-bottom:14px",
+        });
+        var g = h("div", { class: "grid2" });
+        g.appendChild(P.field("開始日期（起）", f.from));
+        g.appendChild(
+          P.field(
+            "開始日期（迄）",
+            f.to,
+            null,
+            "admin-bookings-filter-to-error",
+          ),
+        );
+        g.appendChild(P.field("場地", f.venue));
+        g.appendChild(P.field("狀態", f.status));
+        g.appendChild(P.field("預約者", f.kw));
+        form.appendChild(g);
+        form.appendChild(
+          h("button", {
+            class: "btn primary",
+            type: "submit",
+            tid: "admin-bookings-filter-submit",
+            text: "篩選",
+          }),
+        );
+        root.appendChild(form);
+        var out = h("div");
+        root.appendChild(out);
+        form.addEventListener("submit", function (e) {
+          e.preventDefault();
+          if (f.from.value && f.to.value && f.to.value < f.from.value) {
+            P.fieldErr(
+              f.to,
+              "日期區間不正確：結束日期不可早於開始日期。請重新選擇。",
+            );
+            return;
+          }
+          P.fieldErr(f.to, "");
+          draw(true);
+        });
+
+        var cdlg = null;
+        function cancelDlg(b, trigger) {
+          if (cdlg) cdlg.el.remove();
+          cdlg = P.dialog("admin-cancel-dialog", "取消這筆預約");
+          cdlg.body.appendChild(
+            h("p", {
+              class: "lead",
+              text: "取消後時段立即釋出，並通知預約者。管理員取消不會記為逾時取消。",
+            }),
+          );
+          var ta = h("textarea", { tid: "admin-cancel-reason" });
+          cdlg.body.appendChild(
+            P.field("取消原因（必填）", ta, null, "admin-cancel-reason-error"),
+          );
+          var ok = h("button", {
+            class: "btn danger",
+            tid: "admin-cancel-dialog-confirm",
+            text: "確定取消",
+          });
+          ok.addEventListener("click", function () {
+            if (!ta.value.trim()) {
+              P.fieldErr(ta, "請填寫取消原因。");
+              ta.focus();
+              return;
+            }
+            P.fieldErr(ta, "");
+            ok.disabled = true;
+            ok.textContent = "處理中…";
+            setTimeout(function () {
+              cdlg.close();
+              if (q.get("fail") === "1") {
+                P.toast(
+                  "無法取消這筆預約：預約已開始。請重新整理後再試一次。",
+                  "error",
+                );
+                return;
+              }
+              b.log.push([
+                "2026-11-07 14:00",
+                "王管理",
+                b.status,
+                "cancelled",
+                ta.value.trim(),
+              ]);
+              b.status = "cancelled";
+              b.cancel = false;
+              P.toast("預約已取消，預約者會收到含原因的通知。");
+              draw();
+            }, 500);
+          });
+          cdlg.foot.appendChild(
+            h("button", {
+              class: "btn",
+              tid: "admin-cancel-dialog-cancel",
+              text: "先不要取消",
+              onclick: function () {
+                cdlg.close();
+              },
+            }),
+          );
+          cdlg.foot.appendChild(ok);
+          cdlg.open(trigger);
+        }
+        var openLogs = {};
+        function row(b) {
+          var logId = "log-" + b.id;
+          var tr = h(
+            "tr",
+            {
+              tid: "admin-bookings-item",
+              "data-id": b.id,
+              "aria-label":
+                b.venue +
+                "，" +
+                P.fmtDate(b.date) +
+                " " +
+                b.s +
+                "–" +
+                b.e +
+                "，" +
+                P.statusText(b.status),
+            },
+            h(
+              "td",
+              { "data-label": "場地" },
+              h("strong", { text: b.venue }),
+              h("div", { class: "hint", text: "預約者：" + b.user }),
+            ),
+            h("td", {
+              "data-label": "時間",
+              text: P.fmtDate(b.date) + " " + b.s + "–" + b.e,
+            }),
+            h("td", {
+              "data-label": "主題",
+              text:
+                b.subject +
+                "，" +
+                b.n +
+                " 人" +
+                (b.series
+                  ? "（第 " + b.series[0] + "／" + b.series[1] + " 場）"
+                  : ""),
+            }),
+            h("td", { "data-label": "狀態" }, P.statusTag(b.status, b.late)),
+          );
+          var acts = h(
+            "div",
+            { class: "row" },
+            h("button", {
+              class: "btn sm",
+              tid: "admin-booking-log-toggle",
+              "aria-expanded": String(!!openLogs[b.id]),
+              "aria-controls": logId,
+              text: openLogs[b.id] ? "收合紀錄" : "操作紀錄",
+              onclick: function () {
+                openLogs[b.id] = !openLogs[b.id];
+                draw();
+              },
+            }),
+            b.cancel
+              ? h("button", {
+                  class: "btn sm",
+                  tid: "admin-booking-cancel-button",
+                  text: "取消預約",
+                  onclick: function (e) {
+                    cancelDlg(b, e.target);
+                  },
+                })
+              : null,
+          );
+          tr.appendChild(h("td", { "data-label": "操作" }, acts));
+          var rows = [tr];
+          if (openLogs[b.id]) {
+            var ul = h("ul", {
+              tid: "admin-booking-log",
+              id: logId,
+              "aria-label": b.venue + "的操作紀錄",
+              style:
+                "margin:0;padding-left:20px;line-height:1.8;font-size:13px",
+            });
+            b.log.forEach(function (l) {
+              ul.appendChild(
+                h("li", {
+                  text:
+                    l[0] +
+                    "｜" +
+                    l[1] +
+                    "｜" +
+                    (l[2] === "（新建）" ? l[2] : P.statusText(l[2])) +
+                    " → " +
+                    P.statusText(l[3]) +
+                    "｜" +
+                    (l[4] || "無"),
+                }),
+              );
+            });
+            ul.appendChild(
+              h("li", {
+                style: "list-style:none;color:var(--muted)",
+                text: "操作紀錄不可修改或刪除。",
+              }),
+            );
+            var logTr = h(
+              "tr",
+              null,
+              h("td", { colspan: "5", "data-label": "紀錄" }, ul),
+            );
+            rows.push(logTr);
+          }
+          return rows;
+        }
+        function draw(filtered) {
+          out.innerHTML = "";
+          if (P.state === "loading") {
+            out.setAttribute("aria-busy", "true");
+            out.appendChild(P.skeleton(5, "admin-bookings-loading"));
+            return;
+          }
+          out.removeAttribute("aria-busy");
+          if (P.state === "error") {
+            out.appendChild(
+              P.stateBox(
+                "error",
+                "admin-bookings-error",
+                "無法載入預約資料",
+                "無法載入預約資料。請稍後按「重新載入」再試一次。",
+                [P.reloadBtn()],
+              ),
+            );
+            return;
+          }
+          var kw = f.kw.value.trim();
+          var list = (shown ? data.concat(more) : data)
+            .filter(function (b) {
+              return (
+                (!f.venue.value || b.venue === f.venue.value) &&
+                (!f.status.value || b.status === f.status.value) &&
+                (!kw || b.user.indexOf(kw) >= 0) &&
+                (!f.from.value || b.date >= f.from.value) &&
+                (!f.to.value || b.date <= f.to.value)
+              );
+            })
+            .sort(function (a, b) {
+              return a.date + a.s < b.date + b.s ? 1 : -1;
+            });
+          if (P.state === "empty") list = [];
+          if (!list.length) {
+            out.appendChild(
+              P.stateBox(
+                "empty",
+                "admin-bookings-empty",
+                "沒有符合條件的預約",
+                "",
+              ),
+            );
+            return;
+          }
+          var tbl = h(
+            "table",
+            { class: "tbl", tid: "admin-bookings-list" },
+            h(
+              "thead",
+              null,
+              h(
+                "tr",
+                null,
+                ["場地", "時間", "主題", "狀態", "操作"].map(function (t) {
+                  return h("th", { scope: "col", text: t });
+                }),
+              ),
+            ),
+          );
+          var tb = h("tbody");
+          list.forEach(function (b) {
+            row(b).forEach(function (r) {
+              tb.appendChild(r);
+            });
+          });
+          tbl.appendChild(tb);
+          out.appendChild(tbl);
+          if (!shown)
+            out.appendChild(
+              h(
+                "div",
+                { class: "row", style: "margin-top:12px" },
+                h("button", {
+                  class: "btn",
+                  tid: "admin-bookings-load-more",
+                  text: "載入更多",
+                  onclick: function () {
+                    shown = true;
+                    draw();
+                  },
+                }),
+              ),
+            );
+        }
+        draw();
+      })();
+    </script>
+  </body>
+</html>

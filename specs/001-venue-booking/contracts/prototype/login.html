@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>登入</title>
+    <link rel="stylesheet" href="proto.css" />
+    <style>
+      .auth-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        max-width: 420px;
+        margin: 0 auto;
+        padding: 8px 16px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var view = q.get("view") === "change" ? "change" : "login";
+        var forced = q.get("forced") === "1";
+        var wrap = h("main", {
+          class: "auth-wrap",
+          tid: "auth-page",
+          "aria-busy": P.state === "loading" ? "true" : null,
+        });
+        if (view === "change") {
+          document.title = "變更密碼";
+          document.body.appendChild(
+            h(
+              "div",
+              { class: "auth-top" },
+              h("span", { class: "brand", text: "場地預約" }),
+              h(
+                "span",
+                null,
+                forced
+                  ? null
+                  : h("a", {
+                      class: "btn ghost",
+                      href: "venues.html?role=" + P.role,
+                      text: "返回場地",
+                    }),
+                h("a", {
+                  class: "btn ghost",
+                  tid: "app-logout",
+                  href: "login.html",
+                  text: "登出",
+                }),
+              ),
+            ),
+          );
+        }
+        document.body.appendChild(wrap);
+
+        function msg(kind, text, tid) {
+          return h(
+            "div",
+            {
+              class: "alert " + kind,
+              role: kind === "danger" ? "alert" : "status",
+              tid: tid,
+            },
+            text,
+          );
+        }
+
+        /* ---------- 登入 ---------- */
+        function loginView() {
+          wrap.appendChild(h("h1", { text: "登入" }));
+          wrap.appendChild(
+            h("p", { class: "lead", text: "場地／會議室預約系統" }),
+          );
+          if (q.get("notice") === "changed")
+            wrap.appendChild(
+              msg("ok", "密碼已變更，請用新密碼重新登入。", "auth-notice"),
+            );
+          if (q.get("notice") === "expired")
+            wrap.appendChild(
+              msg("warn", "登入已逾時，請重新登入。", "auth-notice"),
+            );
+          var err = h("div", { tid: "auth-page-error", hidden: true });
+          var busyMsg = h("div", {
+            class: "hint",
+            tid: "auth-page-loading",
+            role: "status",
+            hidden: true,
+            text: "處理中…",
+          });
+          var form = h("form", { tid: "auth-login-form", novalidate: true });
+          var email = h("input", {
+            tid: "auth-email",
+            type: "email",
+            autocomplete: "username",
+            value: "",
+          });
+          var pw = h("input", {
+            tid: "auth-password",
+            type: "password",
+            autocomplete: "current-password",
+          });
+          var submit = h("button", {
+            class: "btn primary",
+            type: "submit",
+            tid: "auth-login-submit",
+            text: "登入",
+            style: "width:100%",
+          });
+          form.appendChild(err);
+          form.appendChild(busyMsg);
+          form.appendChild(P.field("Email", email, null, "auth-email-error"));
+          form.appendChild(P.field("密碼", pw, null, "auth-password-error"));
+          form.appendChild(submit);
+          form.appendChild(
+            h("p", {
+              class: "hint",
+              tid: "auth-forgot-hint",
+              style: "margin-top:14px;font-size:14px",
+              text: "請洽管理員重設密碼",
+            }),
+          );
+          wrap.appendChild(form);
+
+          function showErr(text) {
+            err.hidden = false;
+            err.innerHTML = "";
+            err.appendChild(msg("danger", text));
+          }
+          function setBusy(b) {
+            submit.disabled = b;
+            email.disabled = b;
+            pw.disabled = b;
+            form.setAttribute("aria-busy", b);
+            busyMsg.hidden = !b;
+            submit.textContent = b ? "登入中…" : "登入";
+          }
+          if (P.state === "loading") {
+            email.value = "chen@example.com";
+            setBusy(true);
+          }
+          if (P.state === "error") {
+            email.value = "chen@example.com";
+            showErr("Email 或密碼錯誤。請確認後再試一次。");
+          }
+          if (P.state === "empty") {
+            /* 預設空白表單 */
+          }
+          form.addEventListener("submit", function (e) {
+            e.preventDefault();
+            err.hidden = true;
+            var ev = email.value.trim().toLowerCase(),
+              bad = false;
+            P.fieldErr(email, ev ? "" : "請輸入Email。");
+            P.fieldErr(pw, pw.value ? "" : "請輸入密碼。");
+            if (!ev || !pw.value) return;
+            setBusy(true);
+            setTimeout(function () {
+              if (ev === "offline@example.com") {
+                setBusy(false);
+                showErr("無法連線到系統。請檢查網路後再試一次。");
+                return;
+              }
+              if (ev === "disabled@example.com" && pw.value === "Passw0rd!") {
+                setBusy(false);
+                showErr("此帳號已停用。請洽管理員。");
+                return;
+              }
+              if (pw.value !== "Passw0rd!") {
+                setBusy(false);
+                pw.value = "";
+                showErr("Email 或密碼錯誤。請確認後再試一次。");
+                email.focus();
+                return;
+              }
+              if (ev === "reset@example.com") {
+                location.href = "login.html?view=change&forced=1&role=employee";
+                return;
+              }
+              var role =
+                ev.indexOf("wang") === 0 || ev.indexOf("admin") === 0
+                  ? "admin"
+                  : ev.indexOf("lin") === 0
+                    ? "reviewer"
+                    : "employee";
+              location.href = "venues.html?role=" + role;
+            }, 600);
+          });
+          email.focus();
+        }
+
+        /* ---------- 變更密碼 ---------- */
+        function changeView() {
+          wrap.appendChild(h("h1", { text: "變更密碼" }));
+          if (forced)
+            wrap.appendChild(
+              msg(
+                "warn",
+                "管理員已重設您的密碼。請先設定新密碼，才能使用其他功能。",
+                "auth-forced-notice",
+              ),
+            );
+          var err = h("div", { tid: "auth-page-error", hidden: true });
+          var busyMsg = h("div", {
+            class: "hint",
+            tid: "auth-page-loading",
+            role: "status",
+            hidden: true,
+            text: "處理中…",
+          });
+          var form = h("form", { tid: "auth-change-form", novalidate: true });
+          var oldp = h("input", {
+            tid: "auth-old-password",
+            type: "password",
+            autocomplete: "current-password",
+          });
+          var newp = h("input", {
+            tid: "auth-new-password",
+            type: "password",
+            autocomplete: "new-password",
+          });
+          var conf = h("input", {
+            tid: "auth-confirm-password",
+            type: "password",
+            autocomplete: "new-password",
+          });
+          var submit = h("button", {
+            class: "btn primary",
+            type: "submit",
+            tid: "auth-change-submit",
+            text: "儲存新密碼",
+            style: "width:100%",
+          });
+          form.appendChild(err);
+          form.appendChild(busyMsg);
+          form.appendChild(
+            P.field("舊密碼", oldp, null, "auth-old-password-error"),
+          );
+          form.appendChild(
+            P.field(
+              "新密碼",
+              newp,
+              "長度須為 8 到 128 個字元。",
+              "auth-new-password-error",
+            ),
+          );
+          form.appendChild(
+            P.field(
+              "再次輸入新密碼",
+              conf,
+              null,
+              "auth-confirm-password-error",
+            ),
+          );
+          form.appendChild(submit);
+          wrap.appendChild(form);
+          function setBusy(b) {
+            [oldp, newp, conf, submit].forEach(function (c) {
+              c.disabled = b;
+            });
+            form.setAttribute("aria-busy", b);
+            busyMsg.hidden = !b;
+            submit.textContent = b ? "儲存中…" : "儲存新密碼";
+          }
+          if (P.state === "loading") setBusy(true);
+          if (P.state === "error") {
+            oldp.value = "";
+            P.fieldErr(oldp, "舊密碼不正確。請重新輸入。");
+          }
+          form.addEventListener("submit", function (e) {
+            e.preventDefault();
+            var ok = true;
+            P.fieldErr(oldp, oldp.value ? "" : "請輸入舊密碼。");
+            if (!oldp.value) ok = false;
+            var len = newp.value.length;
+            if (len < 8 || len > 128) {
+              P.fieldErr(newp, "新密碼長度須為 8 到 128 個字元。請重新輸入。");
+              ok = false;
+            } else P.fieldErr(newp, "");
+            if (conf.value !== newp.value) {
+              P.fieldErr(conf, "兩次輸入的新密碼不一致。請重新輸入。");
+              ok = false;
+            } else P.fieldErr(conf, "");
+            if (!ok) return;
+            setBusy(true);
+            setTimeout(function () {
+              if (oldp.value !== "Passw0rd!") {
+                setBusy(false);
+                P.fieldErr(oldp, "舊密碼不正確。請重新輸入。");
+                oldp.focus();
+                return;
+              }
+              location.href = "login.html?notice=changed";
+            }, 600);
+          });
+          oldp.focus();
+        }
+        if (view === "change") changeView();
+        else loginView();
+      })();
+    </script>
+  </body>
+</html>

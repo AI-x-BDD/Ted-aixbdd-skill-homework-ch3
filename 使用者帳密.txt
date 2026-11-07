@@ -1,0 +1,9 @@
+使用者帳密
+角色	Email	密碼
+管理員	admin@example.com	Admin12345!
+審核者	reviewer@example.com	User12345!
+一般使用者	user@example.com	User12345!
+
+
+npm run dev:backend
+npm run dev:frontend

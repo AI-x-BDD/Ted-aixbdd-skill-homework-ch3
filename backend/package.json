@@ -1,0 +1,11 @@
+{
+  "type": "module",
+  "dependencies": {
+    "mysql2": "^3.24.0"
+  },
+  "scripts": {
+    "start": "node --env-file=.env src/server.js",
+    "migrate": "node --env-file=.env src/db/migrate.js",
+    "bootstrap-admin": "node --env-file=.env scripts/bootstrap-admin.js"
+  }
+}

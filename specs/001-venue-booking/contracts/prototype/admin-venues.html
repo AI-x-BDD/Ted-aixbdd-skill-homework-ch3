@@ -1,0 +1,826 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>場地管理</title>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script src="impact.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("admin-venues.html", "admin");
+        if (!main) return;
+        var venues = P.VENUES.map(function (v) {
+          return Object.assign({}, v, {
+            hours: [
+              [1, "09:00", "18:00"],
+              [2, "09:00", "18:00"],
+              [3, "09:00", "18:00"],
+              [4, "09:00", "18:00"],
+              [5, "09:00", "18:00"],
+              [6, "09:00", "18:00"],
+            ],
+          });
+        });
+        var maint = {
+          v1: [
+            {
+              id: "m1",
+              sd: "2026-11-10",
+              st: "12:00",
+              ed: "2026-11-10",
+              et: "14:00",
+            },
+          ],
+          v2: [],
+          v3: [],
+          v4: [],
+          v5: [],
+        };
+        var CANDIDATES = ["林審核", "黃審核", "吳審核"];
+        var WD = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"];
+        var selected = q.get("select") || (P.state === "success" ? "v1" : null);
+        var root = h("div", { tid: "admin-venues" });
+        main.appendChild(root);
+        root.appendChild(
+          h(
+            "div",
+            { class: "row", style: "justify-content:space-between" },
+            P.header("場地管理"),
+            h("button", {
+              class: "btn primary",
+              tid: "venue-add",
+              text: "新增場地",
+              onclick: function (e) {
+                openForm(null, e.target);
+              },
+            }),
+          ),
+        );
+        var out = h("div");
+        root.appendChild(out);
+        var msec = h("section", {
+          tid: "maintenance-section",
+          style: "margin-top:24px",
+        });
+        root.appendChild(msec);
+
+        /* ---------- 清單 ---------- */
+        function draw() {
+          out.innerHTML = "";
+          if (P.state === "loading") {
+            out.setAttribute("aria-busy", "true");
+            out.appendChild(P.skeleton(4, "admin-venues-loading"));
+            msec.hidden = true;
+            return;
+          }
+          out.removeAttribute("aria-busy");
+          if (P.state === "error") {
+            out.appendChild(
+              P.stateBox(
+                "error",
+                "admin-venues-error",
+                "無法載入場地資料",
+                "無法載入場地資料。請稍後按「重新載入」再試一次。",
+                [P.reloadBtn()],
+              ),
+            );
+            msec.hidden = true;
+            return;
+          }
+          if (P.state === "empty") {
+            out.appendChild(
+              P.stateBox("empty", "admin-venues-empty", "還沒有場地", "", [
+                h("button", {
+                  class: "btn primary",
+                  text: "新增場地",
+                  onclick: function (e) {
+                    openForm(null, e.target);
+                  },
+                }),
+              ]),
+            );
+            msec.hidden = true;
+            return;
+          }
+          var tbl = h(
+            "table",
+            { class: "tbl", tid: "admin-venues-list" },
+            h(
+              "thead",
+              null,
+              h(
+                "tr",
+                null,
+                [
+                  "名稱",
+                  "地點",
+                  "容納人數",
+                  "設備",
+                  "審核",
+                  "狀態",
+                  "操作",
+                ].map(function (t) {
+                  return h("th", { scope: "col", text: t });
+                }),
+              ),
+            ),
+          );
+          var tb = h("tbody");
+          venues.forEach(function (v) {
+            var rev = !v.approval
+              ? h("span", { text: "不需審核" })
+              : v.reviewers.length
+                ? h(
+                    "span",
+                    null,
+                    h("span", { class: "tag warn", text: "需要審核" }),
+                    " " + v.reviewers.join("、"),
+                  )
+                : h(
+                    "span",
+                    null,
+                    h("span", { class: "tag warn", text: "需要審核" }),
+                    " ",
+                    h("span", { class: "err", text: "尚未指派審核者" }),
+                  );
+            tb.appendChild(
+              h(
+                "tr",
+                {
+                  tid: "admin-venues-item",
+                  "data-id": v.id,
+                  style: v.active ? "" : "opacity:.65",
+                },
+                h(
+                  "td",
+                  { "data-label": "名稱" },
+                  h("strong", { text: v.name }),
+                ),
+                h("td", { "data-label": "地點", text: v.loc }),
+                h("td", { "data-label": "容納人數", text: v.cap }),
+                h("td", { "data-label": "設備", text: v.eq.join("、") }),
+                h("td", { "data-label": "審核" }, rev),
+                h(
+                  "td",
+                  { "data-label": "狀態" },
+                  h("span", {
+                    class: "tag " + (v.active ? "ok" : "danger"),
+                    text: v.active ? "啟用中" : "已停用",
+                  }),
+                ),
+                h(
+                  "td",
+                  { "data-label": "操作" },
+                  h(
+                    "div",
+                    { class: "row" },
+                    h("button", {
+                      class: "btn sm",
+                      tid: "venue-edit",
+                      text: "編輯",
+                      onclick: function (e) {
+                        openForm(v, e.target);
+                      },
+                    }),
+                    h("button", {
+                      class: "btn sm",
+                      text: "維護時段",
+                      onclick: function () {
+                        selected = v.id;
+                        drawMaint();
+                        msec.scrollIntoView();
+                      },
+                    }),
+                    v.active
+                      ? h("button", {
+                          class: "btn sm",
+                          tid: "venue-disable-button",
+                          text: "停用",
+                          onclick: function (e) {
+                            disable(v, e.target);
+                          },
+                        })
+                      : h("button", {
+                          class: "btn sm",
+                          tid: "venue-enable-button",
+                          text: "重新啟用",
+                          onclick: function (e) {
+                            enable(v, e.target);
+                          },
+                        }),
+                  ),
+                ),
+              ),
+            );
+          });
+          tbl.appendChild(tb);
+          out.appendChild(tbl);
+          msec.hidden = false;
+          drawMaint();
+        }
+
+        /* ---------- 停用 / 啟用 ---------- */
+        var ENV = {
+          v1: [],
+          v2: [
+            "陳小明，2026年11月12日（週四） 14:00–16:00，待審核",
+            "吳雅婷，2026年11月17日（週二） 13:00–17:00，待審核",
+          ],
+          v3: ["王小華，2026年11月18日（週三） 13:00–17:00，已確認"],
+          v4: ["陳小明，2026年11月17日（週二） 09:30–10:30，已確認"],
+          v5: [],
+        };
+        function disable(v, trigger) {
+          var items = ENV[v.id] || [],
+            wl = v.id === "v2" ? 1 : 0;
+          P.impactDialog(
+            {
+              tid: "venue-impact-dialog",
+              title: "停用 " + v.name,
+              intro: function (n, w) {
+                return (
+                  "停用後，以下 " +
+                  n +
+                  " 筆未來預約會被取消，" +
+                  w +
+                  " 筆候補會失效，預約者與候補者會收到通知。"
+                );
+              },
+              items: items,
+              waitlist: wl,
+              confirmLabel: "確認停用並取消預約",
+              cancelLabel: "先不要停用",
+              changedItems:
+                q.get("changed") === "1"
+                  ? items.concat([
+                      "林小芳，2026年11月19日（週四） 10:00–11:00，已確認",
+                    ])
+                  : null,
+              onConfirm: function (n, w) {
+                v.active = false;
+                P.toast(
+                  "場地已停用，已取消 " +
+                    n +
+                    " 筆預約，" +
+                    w +
+                    " 筆候補已失效。",
+                );
+                draw();
+              },
+            },
+            trigger,
+          );
+        }
+        function enable(v, trigger) {
+          P.confirm(
+            "venue-enable-dialog",
+            "重新啟用 " + v.name,
+            "重新啟用後場地會再出現在查詢結果，先前被取消的預約不會恢復。",
+            "重新啟用",
+            "先不要啟用",
+            function () {
+              v.active = true;
+              P.toast("場地已重新啟用。");
+              draw();
+            },
+            false,
+          ).open(trigger);
+        }
+
+        /* ---------- 場地表單 ---------- */
+        var fdlg = null;
+        function openForm(v, trigger) {
+          if (fdlg) fdlg.el.remove();
+          fdlg = P.dialog("venue-form-dialog", v ? "編輯場地" : "新增場地");
+          var f = {
+            name: h("input", {
+              tid: "venue-name",
+              type: "text",
+              value: v ? v.name : "",
+            }),
+            loc: h("input", {
+              tid: "venue-location",
+              type: "text",
+              value: v ? v.loc : "",
+            }),
+            cap: h("input", {
+              tid: "venue-capacity",
+              type: "number",
+              min: "1",
+              inputmode: "numeric",
+              value: v ? v.cap : "",
+            }),
+            eq: h("input", {
+              tid: "venue-equipment",
+              type: "text",
+              value: v ? v.eq.join("，") : "",
+            }),
+            req: h("input", {
+              tid: "venue-requires-approval",
+              type: "checkbox",
+              checked: v ? v.approval : false,
+              id: "req-ap",
+            }),
+          };
+          var form = h("form", { novalidate: true, id: "vform" });
+          if (v)
+            form.appendChild(
+              h("p", {
+                class: "hint",
+                text: "修改只適用於之後的新預約，不會改變既有預約。",
+              }),
+            );
+          form.appendChild(P.field("名稱", f.name, null, "venue-name-error"));
+          form.appendChild(P.field("地點", f.loc));
+          form.appendChild(
+            P.field("容納人數", f.cap, null, "venue-capacity-error"),
+          );
+          form.appendChild(P.field("設備", f.eq, "多個設備請用逗號分隔。"));
+          form.appendChild(
+            h(
+              "div",
+              { class: "field" },
+              h(
+                "label",
+                {
+                  class: "checks",
+                  for: "req-ap",
+                  style:
+                    "display:inline-flex;gap:8px;align-items:center;min-height:44px",
+                },
+                f.req,
+                "需要審核",
+              ),
+            ),
+          );
+          var revWrap = h("div", {
+            class: "checks",
+            tid: "venue-reviewers",
+            role: "group",
+            "aria-label": "審核者",
+          });
+          CANDIDATES.forEach(function (n) {
+            revWrap.appendChild(
+              h(
+                "label",
+                null,
+                h("input", {
+                  type: "checkbox",
+                  value: n,
+                  checked: v && v.reviewers.indexOf(n) >= 0,
+                }),
+                n,
+              ),
+            );
+          });
+          var revErr = h("div", {
+            class: "err",
+            tid: "venue-reviewers-error",
+            role: "alert",
+            hidden: true,
+          });
+          form.appendChild(
+            h(
+              "div",
+              { class: "field" },
+              h("span", { class: "lbl", text: "審核者" }),
+              revWrap,
+              revErr,
+            ),
+          );
+          var hours = (
+            v
+              ? v.hours
+              : [
+                  [1, "09:00", "18:00"],
+                  [2, "09:00", "18:00"],
+                  [3, "09:00", "18:00"],
+                  [4, "09:00", "18:00"],
+                  [5, "09:00", "18:00"],
+                ]
+          ).map(function (x) {
+            return x.slice();
+          });
+          var hWrap = h("div", { tid: "venue-hours" }),
+            hErr = h("div", {
+              class: "err",
+              tid: "venue-hours-error",
+              role: "alert",
+              hidden: true,
+            });
+          function drawHours() {
+            hWrap.innerHTML = "";
+            [1, 2, 3, 4, 5, 6, 0].forEach(function (wd) {
+              var row = h(
+                "div",
+                { style: "margin-bottom:8px" },
+                h("strong", { text: WD[wd] }),
+                " ",
+              );
+              hours.forEach(function (r, idx) {
+                if (r[0] !== wd) return;
+                var s = P.select("", "", P.times(0, 1410), r[1]),
+                  e = P.select("", "", P.times(30, 1440), r[2]);
+                s.removeAttribute("data-testid");
+                e.removeAttribute("data-testid");
+                s.id = "";
+                e.id = "";
+                s.setAttribute("aria-label", WD[wd] + "開始");
+                e.setAttribute("aria-label", WD[wd] + "結束");
+                s.style.cssText = e.style.cssText =
+                  "min-height:44px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:inherit;padding:0 6px";
+                s.onchange = function () {
+                  r[1] = s.value;
+                };
+                e.onchange = function () {
+                  r[2] = e.value;
+                };
+                row.appendChild(
+                  h(
+                    "span",
+                    {
+                      style:
+                        "display:inline-flex;gap:4px;align-items:center;margin:2px 6px 2px 0",
+                    },
+                    s,
+                    "–",
+                    e,
+                    h("button", {
+                      class: "btn sm",
+                      type: "button",
+                      tid: "venue-hours-remove",
+                      text: "移除時段",
+                      onclick: function () {
+                        hours.splice(idx, 1);
+                        drawHours();
+                      },
+                    }),
+                  ),
+                );
+              });
+              row.appendChild(
+                h("button", {
+                  class: "btn sm",
+                  type: "button",
+                  tid: "venue-hours-add",
+                  text: "新增時段",
+                  onclick: function () {
+                    hours.push([wd, "09:00", "18:00"]);
+                    drawHours();
+                  },
+                }),
+              );
+              hWrap.appendChild(row);
+            });
+          }
+          drawHours();
+          form.appendChild(
+            h(
+              "div",
+              { class: "field" },
+              h("span", { class: "lbl", text: "開放時段" }),
+              h("span", {
+                class: "hint",
+                text: "依星期設定，時間以 30 分鐘為單位；每個星期可新增多段。",
+              }),
+              hWrap,
+              hErr,
+            ),
+          );
+          fdlg.body.appendChild(form);
+          var save = h("button", {
+            class: "btn primary",
+            type: "submit",
+            form: "vform",
+            tid: "venue-save",
+            text: "儲存",
+          });
+          fdlg.foot.appendChild(
+            h("button", {
+              class: "btn",
+              type: "button",
+              tid: "venue-form-dialog-cancel",
+              text: "取消",
+              onclick: function () {
+                fdlg.close();
+              },
+            }),
+          );
+          fdlg.foot.appendChild(save);
+          form.addEventListener("submit", function (e) {
+            e.preventDefault();
+            var ok = true;
+            var nm = f.name.value.trim();
+            if (!nm) {
+              P.fieldErr(f.name, "請輸入場地名稱。");
+              ok = false;
+            } else if (
+              venues.some(function (x) {
+                return x !== v && x.name === nm;
+              })
+            ) {
+              P.fieldErr(f.name, "名稱已被使用。請改用其他名稱。");
+              ok = false;
+            } else P.fieldErr(f.name, "");
+            if (!(parseInt(f.cap.value, 10) >= 1)) {
+              P.fieldErr(f.cap, "容納人數須為 1 以上的整數。請重新輸入。");
+              ok = false;
+            } else P.fieldErr(f.cap, "");
+            var bad = hours.some(function (r) {
+              return P.min(r[2]) <= P.min(r[1]);
+            });
+            hErr.hidden = !bad;
+            hErr.textContent = bad
+              ? "開放時段的結束時間須晚於開始時間。請重新選擇。"
+              : "";
+            if (bad) ok = false;
+            var picked = [].slice
+              .call(revWrap.querySelectorAll("input:checked"))
+              .map(function (i) {
+                return i.value;
+              });
+            var noRev = f.req.checked && !picked.length;
+            revErr.hidden = !noRev;
+            revErr.textContent = noRev ? "請至少指派一位審核者。" : "";
+            if (noRev) ok = false;
+            if (!ok) return;
+            save.disabled = true;
+            save.textContent = "儲存中…";
+            setTimeout(function () {
+              var rec = {
+                name: nm,
+                loc: f.loc.value.trim(),
+                cap: parseInt(f.cap.value, 10),
+                eq: f.eq.value
+                  .split(/[,，、]/)
+                  .map(function (s) {
+                    return s.trim();
+                  })
+                  .filter(Boolean),
+                approval: f.req.checked,
+                reviewers: picked,
+                hours: hours,
+              };
+              if (v) Object.assign(v, rec);
+              else
+                venues.push(
+                  Object.assign(
+                    { id: "v" + (venues.length + 1), active: true },
+                    rec,
+                  ),
+                );
+              fdlg.close();
+              P.toast("場地已儲存。");
+              draw();
+            }, 500);
+          });
+          fdlg.open(trigger);
+        }
+
+        /* ---------- 維護時段 ---------- */
+        function drawMaint() {
+          msec.innerHTML = "";
+          var v = venues.filter(function (x) {
+            return x.id === selected;
+          })[0];
+          if (!v) {
+            msec.appendChild(
+              h("p", {
+                class: "lead",
+                text: "在上方清單選擇「維護時段」，即可管理該場地的維護時段。",
+              }),
+            );
+            return;
+          }
+          msec.appendChild(
+            h(
+              "div",
+              { class: "row", style: "justify-content:space-between" },
+              h("h2", { style: "margin:0", text: v.name + "的維護時段" }),
+              h("button", {
+                class: "btn primary",
+                tid: "maintenance-add",
+                text: "新增維護時段",
+                onclick: function (e) {
+                  openMaint(v, null, e.target);
+                },
+              }),
+            ),
+          );
+          var list = maint[v.id] || [];
+          if (!list.length) {
+            msec.appendChild(
+              h(
+                "div",
+                { style: "margin-top:10px" },
+                P.stateBox(
+                  "empty",
+                  "admin-venues-empty",
+                  "目前沒有維護時段。",
+                  "",
+                ),
+              ),
+            );
+            return;
+          }
+          var ul = h("ul", {
+            class: "list",
+            tid: "maintenance-list",
+            style: "margin-top:10px",
+          });
+          list.forEach(function (m) {
+            ul.appendChild(
+              h(
+                "li",
+                { class: "item", "data-id": m.id },
+                h("div", {
+                  class: "title",
+                  text:
+                    P.fmtDate(m.sd) +
+                    " " +
+                    m.st +
+                    " 至 " +
+                    P.fmtDate(m.ed) +
+                    " " +
+                    m.et,
+                }),
+                h(
+                  "div",
+                  { class: "row" },
+                  h("button", {
+                    class: "btn sm",
+                    tid: "maintenance-edit",
+                    text: "編輯",
+                    onclick: function (e) {
+                      openMaint(v, m, e.target);
+                    },
+                  }),
+                  h("button", {
+                    class: "btn sm",
+                    tid: "maintenance-delete",
+                    text: "刪除",
+                    onclick: function (e) {
+                      P.confirm(
+                        "maintenance-delete-dialog",
+                        "刪除維護時段",
+                        "要刪除這個維護時段嗎？刪除後該時段會恢復為可預約。",
+                        "確定刪除",
+                        "先不要刪除",
+                        function () {
+                          maint[v.id] = list.filter(function (x) {
+                            return x !== m;
+                          });
+                          P.toast("維護時段已刪除。");
+                          drawMaint();
+                        },
+                        true,
+                      ).open(e.target);
+                    },
+                  }),
+                ),
+              ),
+            );
+          });
+          msec.appendChild(ul);
+        }
+        var mdlg = null;
+        function openMaint(v, m, trigger) {
+          if (mdlg) mdlg.el.remove();
+          mdlg = P.dialog(
+            "maintenance-form-dialog",
+            m ? "編輯維護時段" : "新增維護時段",
+          );
+          var f = {
+            sd: h("input", {
+              tid: "maintenance-start-date",
+              type: "date",
+              value: m ? m.sd : "",
+            }),
+            st: P.select(
+              "maintenance-start-time",
+              "",
+              P.times(0, 1410),
+              m ? m.st : "09:00",
+            ),
+            ed: h("input", {
+              tid: "maintenance-end-date",
+              type: "date",
+              value: m ? m.ed : "",
+            }),
+            et: P.select(
+              "maintenance-end-time",
+              "",
+              P.times(30, 1440),
+              m ? m.et : "10:00",
+            ),
+          };
+          var form = h("form", { novalidate: true, id: "mform" });
+          var g = h("div", { class: "grid2" });
+          g.appendChild(P.field("開始日期", f.sd));
+          g.appendChild(P.field("開始時間", f.st));
+          g.appendChild(P.field("結束日期", f.ed));
+          g.appendChild(
+            P.field("結束時間", f.et, "時間以台北時間（UTC+8）顯示"),
+          );
+          form.appendChild(g);
+          var err = h("div", {
+            class: "err",
+            tid: "maintenance-error",
+            role: "alert",
+            hidden: true,
+          });
+          form.appendChild(err);
+          mdlg.body.appendChild(form);
+          var save = h("button", {
+            class: "btn primary",
+            type: "submit",
+            form: "mform",
+            tid: "maintenance-save",
+            text: "儲存",
+          });
+          mdlg.foot.appendChild(
+            h("button", {
+              class: "btn",
+              type: "button",
+              text: "取消",
+              onclick: function () {
+                mdlg.close();
+              },
+            }),
+          );
+          mdlg.foot.appendChild(save);
+          form.addEventListener("submit", function (e) {
+            e.preventDefault();
+            if (
+              !f.sd.value ||
+              !f.ed.value ||
+              f.ed.value + f.et.value <= f.sd.value + f.st.value
+            ) {
+              err.hidden = false;
+              err.textContent =
+                "時間不正確：結束須晚於開始，且以 30 分鐘為單位。請重新選擇。";
+              return;
+            }
+            err.hidden = true;
+            var rec = {
+              sd: f.sd.value,
+              st: f.st.value,
+              ed: f.ed.value,
+              et: f.et.value,
+            };
+            function commit(n) {
+              if (m) Object.assign(m, rec);
+              else
+                maint[v.id].push(Object.assign({ id: "m" + Date.now() }, rec));
+              mdlg.close();
+              P.toast(
+                "維護時段已建立。" + (n ? "已取消 " + n + " 筆預約。" : ""),
+              );
+              drawMaint();
+            }
+            var affected =
+              v.id === "v2" || f.sd.value === "2026-11-12"
+                ? [
+                    "陳小明，2026年11月12日（週四） 14:00–16:00，待審核",
+                    "黃大同，2026年11月12日（週四） 16:00–17:00，已確認",
+                  ]
+                : [];
+            if (!affected.length) {
+              commit(0);
+              return;
+            }
+            mdlg.close();
+            P.impactDialog(
+              {
+                tid: "maintenance-impact-dialog",
+                title: v.name + " 維護時段",
+                intro: function (n) {
+                  return (
+                    "這段維護時間內有 " +
+                    n +
+                    " 筆未來預約，確認後會被取消並通知預約者。"
+                  );
+                },
+                items: affected,
+                confirmLabel: "確認建立並取消預約",
+                cancelLabel: "先不要建立",
+                onConfirm: function (n) {
+                  commit(n);
+                },
+              },
+              trigger,
+            );
+          });
+          mdlg.open(trigger);
+        }
+        draw();
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>報表</title>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("admin-reports.html", "admin");
+        if (!main) return;
+        var ND = "無資料";
+        var rows = [
+          {
+            v: "201 會議室",
+            use: "25%",
+            peak: ["週二 14:00–15:00", "週三 10:00–11:00", "週一 09:00–10:00"],
+            cancel: "20%",
+            late: 1,
+            noshow: "25%",
+          },
+          {
+            v: "大會議室",
+            use: "33.3%",
+            peak: ["週四 14:00–15:00", "週四 15:00–16:00", "週二 10:00–11:00"],
+            cancel: "12.5%",
+            late: 0,
+            noshow: "10%",
+          },
+          {
+            v: "培訓教室",
+            use: "8.5%",
+            peak: ["週五 13:00–14:00", "週五 14:00–15:00", "週五 15:00–16:00"],
+            cancel: "0%",
+            late: 0,
+            noshow: "0%",
+          },
+          {
+            v: "小型討論室 A",
+            use: "0%",
+            peak: [],
+            cancel: ND,
+            late: 0,
+            noshow: ND,
+          },
+          {
+            v: "多功能活動室",
+            use: "0%",
+            peak: [],
+            cancel: ND,
+            late: 0,
+            noshow: ND,
+          },
+        ];
+        var root = h("div", { tid: "admin-reports" });
+        main.appendChild(root);
+        root.appendChild(
+          P.header(
+            "報表",
+            "以開始時間落在區間內的預約計算；時間以台北時間（UTC+8）為準。",
+          ),
+        );
+        var f = {
+          from: h("input", {
+            tid: "report-from",
+            type: "date",
+            value: q.get("from") || (P.state === "empty" ? "" : "2026-10-01"),
+          }),
+          to: h("input", {
+            tid: "report-to",
+            type: "date",
+            value: q.get("to") || (P.state === "empty" ? "" : "2026-10-31"),
+          }),
+        };
+        var form = h("form", {
+          class: "card",
+          novalidate: true,
+          style: "margin-bottom:14px",
+        });
+        var g = h("div", { class: "grid2" });
+        g.appendChild(P.field("開始日期", f.from));
+        g.appendChild(P.field("結束日期", f.to, null, "report-to-error"));
+        form.appendChild(g);
+        var gen = h("button", {
+          class: "btn primary",
+          type: "submit",
+          tid: "report-submit",
+          text: "產生報表",
+        });
+        var exp = h("button", {
+          class: "btn",
+          type: "button",
+          tid: "report-export-csv",
+          text: "匯出 CSV",
+          disabled: true,
+        });
+        form.appendChild(h("div", { class: "row" }, gen, exp));
+        root.appendChild(form);
+        var out = h("div", { "aria-live": "polite" });
+        root.appendChild(out);
+        var current = null;
+
+        function peakText(r) {
+          return r.peak.length ? r.peak.join("、") : ND;
+        }
+        function render(from, to) {
+          out.innerHTML = "";
+          current = { from: from, to: to };
+          var tbl = h(
+            "table",
+            { class: "tbl", tid: "report-table" },
+            h("caption", {
+              style: "text-align:left;font-weight:700;padding:8px 0",
+              text: from + " 至 " + to + " 各場地報表",
+            }),
+            h(
+              "thead",
+              null,
+              h(
+                "tr",
+                null,
+                [
+                  "場地",
+                  "使用率",
+                  "尖峰時段",
+                  "取消率",
+                  "逾時取消筆數",
+                  "未到場率",
+                ].map(function (t) {
+                  return h("th", { scope: "col", text: t });
+                }),
+              ),
+            ),
+          );
+          var tb = h("tbody");
+          rows.forEach(function (r) {
+            tb.appendChild(
+              h(
+                "tr",
+                { tid: "report-row" },
+                h("td", { "data-label": "場地" }, h("strong", { text: r.v })),
+                h("td", { "data-label": "使用率", text: r.use }),
+                h("td", { "data-label": "尖峰時段", text: peakText(r) }),
+                h("td", { "data-label": "取消率", text: r.cancel }),
+                h("td", {
+                  "data-label": "逾時取消筆數",
+                  text: r.cancel === ND ? ND : String(r.late),
+                }),
+                h("td", { "data-label": "未到場率", text: r.noshow }),
+              ),
+            );
+          });
+          tbl.appendChild(tb);
+          out.appendChild(tbl);
+          exp.disabled = false;
+        }
+        function placeholder() {
+          out.innerHTML = "";
+          if (P.state === "loading") {
+            out.setAttribute("aria-busy", "true");
+            out.appendChild(P.skeleton(4, "admin-reports-loading"));
+            gen.disabled = true;
+            gen.textContent = "產生中…";
+            exp.disabled = true;
+            return true;
+          }
+          if (P.state === "error") {
+            out.appendChild(
+              P.stateBox(
+                "error",
+                "admin-reports-error",
+                "無法產生報表",
+                "無法產生報表。請稍後按「重新載入」再試一次。",
+                [P.reloadBtn()],
+              ),
+            );
+            return true;
+          }
+          if (P.state === "empty") {
+            out.appendChild(
+              P.stateBox(
+                "empty",
+                "admin-reports-empty",
+                "請選擇日期區間後產生報表",
+                "",
+              ),
+            );
+            return true;
+          }
+          return false;
+        }
+        form.addEventListener("submit", function (e) {
+          e.preventDefault();
+          if (!f.from.value || !f.to.value) {
+            out.innerHTML = "";
+            out.appendChild(
+              P.stateBox(
+                "empty",
+                "admin-reports-empty",
+                "請選擇日期區間後產生報表",
+                "",
+              ),
+            );
+            return;
+          }
+          if (f.to.value < f.from.value) {
+            P.fieldErr(
+              f.to,
+              "日期區間不正確：結束日期不可早於開始日期。請重新選擇。",
+            );
+            return;
+          }
+          P.fieldErr(f.to, "");
+          if (P.state !== "success") {
+            location.href = P.link(
+              "admin-reports.html",
+              "from=" + f.from.value + "&to=" + f.to.value,
+            );
+            return;
+          }
+          gen.disabled = true;
+          gen.textContent = "產生中…";
+          out.setAttribute("aria-busy", "true");
+          setTimeout(function () {
+            gen.disabled = false;
+            gen.textContent = "產生報表";
+            out.removeAttribute("aria-busy");
+            render(f.from.value, f.to.value);
+          }, 500);
+        });
+        exp.addEventListener("click", function () {
+          if (!current) return;
+          exp.disabled = true;
+          exp.textContent = "匯出中…";
+          setTimeout(function () {
+            if (q.get("exportfail") === "1") {
+              P.toast("無法匯出 CSV。請稍後再試一次。", "error");
+            } else {
+              var lines = [
+                [
+                  "場地",
+                  "使用率",
+                  "尖峰時段",
+                  "取消率",
+                  "逾時取消筆數",
+                  "未到場率",
+                ],
+              ].concat(
+                rows.map(function (r) {
+                  return [
+                    r.v,
+                    r.use,
+                    peakText(r),
+                    r.cancel,
+                    r.cancel === ND ? ND : r.late,
+                    r.noshow,
+                  ];
+                }),
+              );
+              var csv =
+                "﻿" +
+                lines
+                  .map(function (l) {
+                    return l
+                      .map(function (c) {
+                        return '"' + String(c).replace(/"/g, '""') + '"';
+                      })
+                      .join(",");
+                  })
+                  .join("\r\n");
+              var a = h("a", {
+                href: URL.createObjectURL(
+                  new Blob([csv], { type: "text/csv;charset=utf-8" }),
+                ),
+                download:
+                  "場地報表_" + current.from + "_" + current.to + ".csv",
+              });
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              P.toast("已匯出 CSV。");
+            }
+            exp.disabled = false;
+            exp.textContent = "匯出 CSV";
+          }, 500);
+        });
+        if (!placeholder()) render(f.from.value, f.to.value);
+      })();
+    </script>
+  </body>
+</html>

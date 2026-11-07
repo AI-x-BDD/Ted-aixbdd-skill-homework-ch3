@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>我的預約</title>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("bookings.html");
+        var data = P.BOOKINGS.map(function (b) {
+          return Object.assign({}, b);
+        });
+        data.push({
+          id: "b9",
+          venue: "小型討論室 A",
+          date: "2026-11-07",
+          s: "14:30",
+          e: "15:30",
+          subject: "臨時討論",
+          n: 3,
+          status: "confirmed",
+          cancel: true,
+          edit: true,
+          checkin: true,
+          soon: true,
+        });
+        data.sort(function (a, b) {
+          return a.date + a.s < b.date + b.s ? -1 : 1;
+        });
+        var tab = q.get("tab") === "past" ? "past" : "upcoming";
+        var extraLoaded = false;
+        var root = h("div", { tid: "my-bookings" });
+        main.appendChild(root);
+        root.appendChild(P.header("我的預約"));
+        if (q.get("suspended") === "1") root.appendChild(P.suspension());
+        var live = h("div", {
+          class: "sr-only",
+          role: "status",
+          "aria-live": "polite",
+        });
+        root.appendChild(live);
+        var tabs = h(
+          "div",
+          { class: "tabs", role: "tablist" },
+          h("button", {
+            role: "tab",
+            tid: "my-bookings-tab-upcoming",
+            onclick: function () {
+              tab = "upcoming";
+              draw();
+            },
+            text: "即將到來",
+          }),
+          h("button", {
+            role: "tab",
+            tid: "my-bookings-tab-past",
+            onclick: function () {
+              tab = "past";
+              draw();
+            },
+            text: "已結束",
+          }),
+        );
+        root.appendChild(tabs);
+        var out = h("div");
+        root.appendChild(out);
+
+        function say(msg, err) {
+          live.textContent = msg;
+          P.toast(msg, err ? "error" : null);
+        }
+
+        function item(b) {
+          var li = h("li", {
+            class: "item",
+            tid: "my-bookings-item",
+            "data-id": b.id,
+            "aria-label":
+              b.venue +
+              "，" +
+              P.fmtDate(b.date) +
+              " " +
+              b.s +
+              "–" +
+              b.e +
+              "，" +
+              P.statusText(b.status),
+          });
+          var top = h(
+            "div",
+            { class: "top" },
+            h("span", { class: "title", text: b.venue }),
+            h(
+              "span",
+              null,
+              P.statusTag(b.status, b.late),
+              b.series
+                ? [
+                    " ",
+                    h("span", {
+                      class: "tag",
+                      text: "第 " + b.series[0] + "／" + b.series[1] + " 場",
+                    }),
+                  ]
+                : null,
+            ),
+          );
+          li.appendChild(top);
+          li.appendChild(
+            h("div", {
+              class: "meta",
+              text: P.fmtDate(b.date) + " " + b.s + "–" + b.e,
+            }),
+          );
+          li.appendChild(
+            h("div", { class: "meta", text: b.subject + "，" + b.n + " 人" }),
+          );
+          if (b.why)
+            li.appendChild(
+              h("div", {
+                class: "meta",
+                style: "color:var(--danger)",
+                text: b.why,
+              }),
+            );
+          var acts = h("div", { class: "row" });
+          if (b.checkin && b.status === "confirmed")
+            acts.appendChild(
+              h("button", {
+                class: "btn sm",
+                tid: "booking-checkin-button",
+                text: "報到",
+                onclick: function (e) {
+                  checkin(b, e.target);
+                },
+              }),
+            );
+          if (b.edit || b.editWhy) {
+            if (b.edit)
+              acts.appendChild(
+                h("a", {
+                  class: "btn sm",
+                  tid: "booking-edit-button",
+                  href: P.link("booking-form.html", "edit=" + b.id),
+                  text: "修改",
+                }),
+              );
+            else {
+              acts.appendChild(
+                h("button", {
+                  class: "btn sm",
+                  tid: "booking-edit-button",
+                  disabled: true,
+                  "aria-describedby": "why-" + b.id,
+                  text: "修改",
+                }),
+              );
+              acts.appendChild(
+                h("span", {
+                  class: "hint",
+                  id: "why-" + b.id,
+                  text: b.editWhy,
+                }),
+              );
+            }
+          }
+          if (b.cancel)
+            acts.appendChild(
+              h("button", {
+                class: "btn sm",
+                tid: "booking-cancel-button",
+                text: "取消預約",
+                onclick: function (e) {
+                  cancelDlg(b, e.target);
+                },
+              }),
+            );
+          if (acts.children.length) li.appendChild(acts);
+          return li;
+        }
+
+        function checkin(b, btn) {
+          btn.disabled = true;
+          btn.textContent = "報到中…";
+          setTimeout(function () {
+            if (b.soon) {
+              b.status = "checked_in";
+              b.checkin = false;
+              b.cancel = false;
+              b.edit = false;
+              say("報到成功，預約狀態已更新為「已報到」。");
+              draw();
+            } else {
+              btn.disabled = false;
+              btn.textContent = "報到";
+              say(
+                "目前不在報到時間內。可報到時間為 " +
+                  P.fmtDate(b.date) +
+                  " " +
+                  P.fmtMin(P.min(b.s) - 10) +
+                  "–" +
+                  P.fmtMin(P.min(b.s) + 15) +
+                  "。",
+                true,
+              );
+            }
+          }, 500);
+        }
+
+        var cdlg = null;
+        function cancelDlg(b, trigger) {
+          if (cdlg) cdlg.el.remove();
+          cdlg = P.dialog("booking-cancel-dialog", "要取消這筆預約嗎？", {
+            alert: true,
+          });
+          cdlg.body.appendChild(
+            h("p", {
+              class: "lead",
+              text: "取消後時段會立即釋出。開始前 1 小時內取消會記為「逾時取消」。",
+            }),
+          );
+          var scope = "single";
+          if (b.series) {
+            cdlg.body.appendChild(
+              h(
+                "div",
+                { class: "field" },
+                h(
+                  "label",
+                  { class: "checks" },
+                  h("input", {
+                    type: "radio",
+                    name: "scope",
+                    tid: "booking-cancel-scope-single",
+                    checked: true,
+                    onchange: function () {
+                      scope = "single";
+                    },
+                  }),
+                  "只取消這一場",
+                ),
+                h(
+                  "label",
+                  { class: "checks" },
+                  h("input", {
+                    type: "radio",
+                    name: "scope",
+                    tid: "booking-cancel-scope-following",
+                    onchange: function () {
+                      scope = "following";
+                    },
+                  }),
+                  "取消這一場及之後所有場次",
+                ),
+              ),
+            );
+          }
+          var ok = h("button", {
+            class: "btn danger",
+            tid: "booking-cancel-dialog-confirm",
+            text: "確定取消",
+          });
+          ok.addEventListener("click", function () {
+            ok.disabled = true;
+            ok.textContent = "處理中…";
+            setTimeout(function () {
+              cdlg.close();
+              if (b.id === "b2" && q.get("fail") === "1") {
+                say(
+                  "無法取消這筆預約：預約已開始。請重新整理後再試一次。",
+                  true,
+                );
+                return;
+              }
+              if (b.series && scope === "following") {
+                var n = 0;
+                data.forEach(function (x) {
+                  if (
+                    x.series &&
+                    x.date >= b.date &&
+                    x.status !== "cancelled"
+                  ) {
+                    x.status = "cancelled";
+                    x.cancel = false;
+                    x.edit = false;
+                    x.why = "取消原因：本人取消（由陳小明取消）";
+                    n++;
+                  }
+                });
+                say("已取消 " + n + " 場。");
+              } else {
+                b.status = "cancelled";
+                b.cancel = false;
+                b.edit = false;
+                b.checkin = false;
+                b.why = "取消原因：本人取消（由陳小明取消）";
+                if (b.soon) {
+                  b.late = true;
+                  say("預約已取消，並記為逾時取消。");
+                } else say("預約已取消。");
+              }
+              draw();
+            }, 500);
+          });
+          cdlg.foot.appendChild(
+            h("button", {
+              class: "btn",
+              tid: "booking-cancel-dialog-cancel",
+              text: "先不要取消",
+              onclick: function () {
+                cdlg.close();
+              },
+            }),
+          );
+          cdlg.foot.appendChild(ok);
+          cdlg.open(trigger);
+        }
+
+        function draw() {
+          tabs.children[0].setAttribute("aria-selected", tab === "upcoming");
+          tabs.children[1].setAttribute("aria-selected", tab === "past");
+          out.innerHTML = "";
+          if (P.state === "loading") {
+            out.setAttribute("aria-busy", "true");
+            out.appendChild(P.skeleton(4, "my-bookings-loading"));
+            return;
+          }
+          out.removeAttribute("aria-busy");
+          if (P.state === "error") {
+            out.appendChild(
+              P.stateBox(
+                "error",
+                "my-bookings-error",
+                "無法載入你的預約",
+                "無法載入你的預約。請稍後按「重新載入」再試一次。",
+                [P.reloadBtn()],
+              ),
+            );
+            return;
+          }
+          var list =
+            P.state === "empty"
+              ? []
+              : data.filter(function (b) {
+                  return tab === "past" ? b.past : !b.past;
+                });
+          if (tab === "past")
+            list.sort(function (a, b) {
+              return a.date + a.s < b.date + b.s ? 1 : -1;
+            });
+          if (!list.length) {
+            out.appendChild(
+              tab === "upcoming"
+                ? P.stateBox(
+                    "empty",
+                    "my-bookings-empty",
+                    "目前沒有即將到來的預約",
+                    "到「場地」查詢空間，就能建立第一筆預約。",
+                    [
+                      h("a", {
+                        class: "btn primary",
+                        tid: "my-bookings-go-venues",
+                        href: P.link("venues.html"),
+                        text: "查詢場地",
+                      }),
+                    ],
+                  )
+                : P.stateBox(
+                    "empty",
+                    "my-bookings-empty",
+                    "還沒有已結束的預約",
+                    "已結束的預約會顯示在這裡。",
+                  ),
+            );
+            return;
+          }
+          var ul = h("ul", { class: "list", tid: "my-bookings-list" });
+          list.forEach(function (b) {
+            ul.appendChild(item(b));
+          });
+          out.appendChild(ul);
+          if (tab === "past" && !extraLoaded)
+            out.appendChild(
+              h(
+                "div",
+                { class: "row", style: "margin-top:12px" },
+                h("button", {
+                  class: "btn",
+                  tid: "my-bookings-load-more",
+                  text: "載入更多",
+                  onclick: function () {
+                    extraLoaded = true;
+                    data.push({
+                      id: "b10",
+                      venue: "培訓教室",
+                      date: "2026-09-15",
+                      s: "09:00",
+                      e: "12:00",
+                      subject: "年度訓練",
+                      n: 30,
+                      status: "completed",
+                      past: true,
+                    });
+                    draw();
+                  },
+                }),
+              ),
+            );
+        }
+        draw();
+      })();
+    </script>
+  </body>
+</html>
