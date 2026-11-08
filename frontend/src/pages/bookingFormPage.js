@@ -1,6 +1,8 @@
 import {
   ALT_TEXT,
   BOOKING_STATUS_LABELS,
+  DEFAULTS_TEXT,
+  FAVORITE_TEXT,
   REBOOK_TEXT,
 } from "../../../shared/src/copy.js";
 
@@ -16,6 +18,8 @@ import { showToast } from "../components/toast.js";
 import { openWaitlistDialog } from "../components/waitlistDialog.js";
 import { h } from "../lib/h.js";
 import { endTimeOptions, formatDate, startTimeOptions } from "../lib/time.js";
+import { groupVenues } from "../lib/venueGroups.js";
+import { deriveEndTime, formatDuration, weekdayOf } from "../lib/defaults.js";
 
 function formatMinutes(minutes) {
   return minutes % 60 === 0 ? `${minutes / 60} 小時` : `${minutes} 分鐘`;
@@ -226,24 +230,106 @@ export async function render(container, params = {}) {
     "aria-readonly": rebookMode ? "true" : null,
   });
   const preVenue = seed?.venueId ?? params.venueId ?? params.venue;
-  for (const item of choices) {
+  // 收藏分組（004 UI-02）：再預約場地固定、不分組；收藏載入失敗時退回不分組
+  const grouped = rebookMode
+    ? { favorites: [], others: choices, favoritesUnavailable: false }
+    : groupVenues(choices);
+  const venueOption = (item) =>
+    h("option", {
+      value: String(item.id),
+      text: item.location
+        ? FAVORITE_TEXT.optionText(item.name, item.location)
+        : item.name,
+      selected: String(item.id) === String(preVenue),
+    });
+  // 新增與週期性預約不自動選定場地：沒有預設場地時停在佔位選項
+  if (
+    !rebookMode &&
+    !choices.some((item) => String(item.id) === String(preVenue))
+  ) {
     venue.append(
       h("option", {
-        value: String(item.id),
-        text: item.location ? `${item.name}（${item.location}）` : item.name,
-        selected: String(item.id) === String(preVenue),
+        value: "",
+        text: FAVORITE_TEXT.venuePlaceholder,
+        selected: true,
       }),
     );
   }
+  if (grouped.favorites.length) {
+    venue.append(
+      h(
+        "optgroup",
+        {
+          label: FAVORITE_TEXT.groupFavorites,
+          testid: "booking-venue-group-favorites",
+        },
+        ...grouped.favorites.map(venueOption),
+      ),
+    );
+    if (grouped.others.length) {
+      venue.append(
+        h(
+          "optgroup",
+          {
+            label: FAVORITE_TEXT.groupOthers,
+            testid: "booking-venue-group-others",
+          },
+          ...grouped.others.map(venueOption),
+        ),
+      );
+    }
+  } else {
+    for (const item of grouped.others) {
+      venue.append(venueOption(item));
+    }
+  }
+  const venueErr = h("div", { class: "err", testid: "booking-venue-error" });
+  const favNotice =
+    !rebookMode && grouped.favoritesUnavailable
+      ? h("div", {
+          class: "alert",
+          role: "status",
+          testid: "booking-favorites-error",
+          text: FAVORITE_TEXT.favoritesLoadFailed,
+        })
+      : null;
   const date = h("input", {
     testid: "booking-date",
     type: "date",
     value: rebookMode ? "" : (existing?.date ?? params.date ?? ctx.today),
   });
+  // 預約預設值（004 UI-03）：從未預約（沒有記住的值）沿用 001 初始值；有記住的值才預填，起訖時間停在「請選擇」
+  const defaults =
+    !rebookMode && !editId && ctx.bookingDefaults ? ctx.bookingDefaults : null;
+  const defaultsFailed =
+    !rebookMode && !editId && ctx.bookingDefaults === undefined;
+  const blankStart =
+    rebookMode || (defaults !== null && !params.startTime && !params.start);
+  const blankEnd =
+    rebookMode || (defaults !== null && !params.endTime && !params.end);
+  const attendeesHint = h("div", {
+    class: "hint",
+    testid: "booking-attendees-hint",
+    text: DEFAULTS_TEXT.attendeesHint,
+    hidden: !defaults,
+  });
+  const endHint = h("div", {
+    class: "hint",
+    testid: "booking-end-hint",
+    hidden: true,
+  });
+  const defaultsNotice = defaultsFailed
+    ? h("div", {
+        class: "alert",
+        role: "status",
+        testid: "booking-defaults-error",
+        text: DEFAULTS_TEXT.loadFailed,
+      })
+    : null;
   const placeholder = () =>
     h("option", { value: "", text: REBOOK_TEXT.timePlaceholder });
   const start = h("select", { testid: "booking-start" });
-  if (rebookMode) {
+  if (blankStart) {
     start.append(placeholder());
   }
   for (const option of startTimeOptions()) {
@@ -251,7 +337,7 @@ export async function render(container, params = {}) {
       h("option", {
         value: option,
         text: option,
-        selected: rebookMode
+        selected: blankStart
           ? false
           : option ===
             (existing?.startTime ??
@@ -262,7 +348,7 @@ export async function render(container, params = {}) {
     );
   }
   const end = h("select", { testid: "booking-end" });
-  if (rebookMode) {
+  if (blankEnd) {
     end.append(placeholder());
   }
   for (const option of endTimeOptions()) {
@@ -270,7 +356,7 @@ export async function render(container, params = {}) {
       h("option", {
         value: option,
         text: option,
-        selected: rebookMode
+        selected: blankEnd
           ? false
           : option ===
             (existing?.endTime ?? params.endTime ?? params.end ?? "09:30"),
@@ -288,7 +374,11 @@ export async function render(container, params = {}) {
     type: "number",
     min: "1",
     inputmode: "numeric",
-    value: seed ? String(seed.attendees) : "",
+    value: seed
+      ? String(seed.attendees)
+      : defaults
+        ? String(defaults.attendees)
+        : "",
   });
   const info = h("p", { class: "hint", testid: "booking-venue-info" });
   const submit = h("button", {
@@ -314,6 +404,88 @@ export async function render(container, params = {}) {
   const seriesOut = h("div", {
     testid: "booking-series-list",
     "aria-live": "polite",
+  });
+
+  // 預填的推導與手動修改優先（ui-contract.md › UI-03 › 操作）
+  let endManual = false;
+  let attendeesManual = false;
+  function dayRanges() {
+    const item = selectedVenue();
+    if (!item || !date.value) {
+      return [];
+    }
+    const weekday = weekdayOf(date.value);
+    return (item.openingHours ?? []).filter(
+      (range) => range.weekday === weekday,
+    );
+  }
+  function showEndHint(text) {
+    endHint.textContent = text ?? "";
+    endHint.hidden = !text;
+  }
+  function applyDerivedEnd() {
+    if (!defaults || endManual || recToggle.checked) {
+      return;
+    }
+    const durationMinutes = defaults.durationMinutes;
+    const maxDurationMinutes = ctx.rules?.maxDurationMinutes ?? null;
+    const tooLong =
+      maxDurationMinutes !== null && durationMinutes > maxDurationMinutes;
+    if (!start.value) {
+      end.value = "";
+      showEndHint(
+        tooLong
+          ? DEFAULTS_TEXT.notFitHint(formatDuration(durationMinutes))
+          : "",
+      );
+      return;
+    }
+    const endTime = deriveEndTime({
+      startTime: start.value,
+      durationMinutes,
+      maxDurationMinutes,
+      openingHours: dayRanges(),
+    });
+    if (endTime) {
+      end.value = endTime;
+      showEndHint(DEFAULTS_TEXT.endHint(formatDuration(durationMinutes)));
+    } else {
+      end.value = "";
+      showEndHint(DEFAULTS_TEXT.notFitHint(formatDuration(durationMinutes)));
+    }
+  }
+  // 勾選重複預約：清掉尚未手動輸入的預填；取消勾選：重新預填並依開始時間帶出結束時間
+  function applyRecurringDefaults() {
+    if (!defaults) {
+      return;
+    }
+    if (recToggle.checked) {
+      if (!attendeesManual) {
+        attendees.value = "";
+        attendeesHint.hidden = true;
+      }
+      if (!endManual) {
+        end.value = "";
+        showEndHint("");
+      }
+      return;
+    }
+    if (!attendeesManual) {
+      attendees.value = String(defaults.attendees);
+      attendeesHint.hidden = false;
+    }
+    applyDerivedEnd();
+  }
+  start.addEventListener("change", applyDerivedEnd);
+  date.addEventListener("change", applyDerivedEnd);
+  venue.addEventListener("change", applyDerivedEnd);
+  end.addEventListener("change", () => {
+    endManual = true;
+    showEndHint("");
+  });
+  attendees.addEventListener("input", () => {
+    attendeesManual = true;
+    attendeesHint.hidden = true;
   });
 
   function selectedVenue() {
@@ -351,6 +523,7 @@ export async function render(container, params = {}) {
   recToggle.addEventListener("change", () => {
     recBox.hidden = !recToggle.checked;
     seriesOut.replaceChildren();
+    applyRecurringDefaults();
   });
 
   const step = (n, text) =>
@@ -368,6 +541,7 @@ export async function render(container, params = {}) {
         { class: "field" },
         h("label", { text: "場地" }, venue),
         info,
+        venueErr,
         rebookMode
           ? h(
               "div",
@@ -401,6 +575,7 @@ export async function render(container, params = {}) {
           "div",
           { class: "field" },
           h("label", { text: "結束時間" }, end),
+          endHint,
           h("div", { class: "err", testid: "booking-end-error" }),
         ),
       ),
@@ -420,6 +595,7 @@ export async function render(container, params = {}) {
         "div",
         { class: "field" },
         h("label", { text: "人數" }, attendees),
+        attendeesHint,
         h("div", { class: "err", testid: "booking-attendees-error" }),
       ),
       editId || rebookMode
@@ -453,7 +629,14 @@ export async function render(container, params = {}) {
       }),
     );
   }
+  if (favNotice) {
+    root.append(favNotice);
+  }
+  if (defaultsNotice) {
+    root.append(defaultsNotice);
+  }
   root.append(form, result);
+  applyDerivedEnd();
   if (rebookMode && source.venueActive === false) {
     root.append(
       h("div", {
@@ -805,6 +988,7 @@ export async function render(container, params = {}) {
   // 不在此攔截，交由後端與「時段被占用」一併並列回報（FR-008、FR-017）
   function preSubmitCheck() {
     const checks = [
+      [venue, !venue.value, FAVORITE_TEXT.venueRequired],
       [date, !date.value, REBOOK_TEXT.requiredDate],
       [start, !start.value, REBOOK_TEXT.requiredStart],
       [end, !end.value, REBOOK_TEXT.requiredEnd],

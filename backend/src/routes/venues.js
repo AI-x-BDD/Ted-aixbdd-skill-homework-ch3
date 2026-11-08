@@ -1,5 +1,6 @@
 import { HttpError, sendJson } from "../lib/http.js";
 import { requireAuth } from "../lib/auth.js";
+import * as favoriteService from "../services/favoriteService.js";
 import * as venueService from "../services/venueService.js";
 
 export function register(router) {
@@ -13,6 +14,28 @@ export function register(router) {
         capacity: req.query.capacity,
         equipment: req.query.equipment,
       });
+      sendJson(res, 200, result);
+    }),
+  );
+
+  router.put(
+    "/api/venues/:venueId/favorite",
+    requireAuth(async (req, res, { user }) => {
+      const result = await favoriteService.addFavorite(
+        user,
+        Number(req.params.venueId),
+      );
+      sendJson(res, 200, result);
+    }),
+  );
+
+  router.delete(
+    "/api/venues/:venueId/favorite",
+    requireAuth(async (req, res, { user }) => {
+      const result = await favoriteService.removeFavorite(
+        user,
+        Number(req.params.venueId),
+      );
       sendJson(res, 200, result);
     }),
   );

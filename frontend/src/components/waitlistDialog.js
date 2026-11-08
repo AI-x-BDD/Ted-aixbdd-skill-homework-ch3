@@ -1,6 +1,8 @@
+import { FAVORITE_TEXT } from "../../../shared/src/copy.js";
 import { get, post } from "../api/client.js";
 import { h } from "../lib/h.js";
 import { endTimeOptions, startTimeOptions } from "../lib/time.js";
+import { groupVenues } from "../lib/venueGroups.js";
 import { showToast } from "./toast.js";
 
 function setError(el, message) {
@@ -29,14 +31,35 @@ export async function openWaitlistDialog(pre = {}) {
       "aria-labelledby": "waitlist-dialog-title",
     });
     const venue = h("select", { testid: "waitlist-register-venue" });
-    for (const item of venues) {
+    // 收藏分組（004 UI-02）：與預約表單共用同一分組規則；預選仍沿用 pre.venueId
+    const grouped = groupVenues(venues);
+    const venueOption = (item) =>
+      h("option", {
+        value: String(item.id),
+        text: item.name,
+        selected: String(item.id) === String(pre.venueId ?? pre.venue ?? ""),
+      });
+    if (grouped.favorites.length) {
       venue.append(
-        h("option", {
-          value: String(item.id),
-          text: item.name,
-          selected: String(item.id) === String(pre.venueId ?? pre.venue ?? ""),
-        }),
+        h(
+          "optgroup",
+          { label: FAVORITE_TEXT.groupFavorites },
+          ...grouped.favorites.map(venueOption),
+        ),
       );
+      if (grouped.others.length) {
+        venue.append(
+          h(
+            "optgroup",
+            { label: FAVORITE_TEXT.groupOthers },
+            ...grouped.others.map(venueOption),
+          ),
+        );
+      }
+    } else {
+      for (const item of grouped.others) {
+        venue.append(venueOption(item));
+      }
     }
     const date = h("input", {
       testid: "waitlist-register-date",

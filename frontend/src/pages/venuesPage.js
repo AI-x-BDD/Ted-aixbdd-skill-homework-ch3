@@ -1,9 +1,101 @@
-import { get } from "../api/client.js";
+import { del, get, put } from "../api/client.js";
+import { FAVORITE_TEXT } from "../../../shared/src/copy.js";
 import { renderCalendar } from "../components/calendar.js";
 import { mountPage } from "../components/nav.js";
 import { openWaitlistDialog } from "../components/waitlistDialog.js";
+import { showToast } from "../components/toast.js";
 import { h } from "../lib/h.js";
 import { endTimeOptions, startTimeOptions } from "../lib/time.js";
+
+// 收藏按鈕（UI-01）：本人已收藏時顯示「已收藏」標記與「取消收藏」；
+// 處理中停用按鈕；場地已停用被拒絕時標示「已停用」並停用「加入收藏」。
+function favoriteControl(venue, testid) {
+  const state = {
+    isFavorite: venue.isFavorite === true,
+    busy: false,
+    disabled: false,
+  };
+  const row = h("div", { class: "favorite-row" });
+  const mark = h("span", {
+    class: "tag accent",
+    testid: "venue-favorite-mark",
+    text: FAVORITE_TEXT.favoriteMark,
+  });
+  const disabledTag = h("span", {
+    class: "tag danger",
+    testid: "venue-favorite-disabled-tag",
+    text: FAVORITE_TEXT.disabledTag,
+  });
+  const toggle = h("button", {
+    class: "btn sm favorite-toggle",
+    type: "button",
+    testid,
+  });
+
+  function paint() {
+    toggle.textContent = state.busy
+      ? FAVORITE_TEXT.pending
+      : state.isFavorite
+        ? FAVORITE_TEXT.removeButton
+        : FAVORITE_TEXT.addButton;
+    toggle.setAttribute("aria-pressed", String(state.isFavorite));
+    toggle.setAttribute(
+      "aria-label",
+      state.isFavorite
+        ? FAVORITE_TEXT.removeLabel(venue.name)
+        : FAVORITE_TEXT.addLabel(venue.name),
+    );
+    if (state.busy) {
+      toggle.setAttribute("aria-busy", "true");
+    } else {
+      toggle.removeAttribute("aria-busy");
+    }
+    toggle.disabled = state.busy || (state.disabled && !state.isFavorite);
+    mark.hidden = !state.isFavorite;
+    disabledTag.hidden = !state.disabled;
+  }
+
+  async function act() {
+    const wasFavorite = state.isFavorite;
+    state.busy = true;
+    paint();
+    try {
+      const path = `/api/venues/${venue.id}/favorite`;
+      const result = wasFavorite ? await del(path) : await put(path);
+      state.isFavorite = result.isFavorite === true;
+      showToast(
+        state.isFavorite
+          ? FAVORITE_TEXT.addedToast
+          : FAVORITE_TEXT.removedToast,
+      );
+    } catch (error) {
+      if (
+        error?.status === 409 &&
+        error.violations?.some((item) => item.rule === "venue_inactive")
+      ) {
+        state.disabled = true;
+        showToast(FAVORITE_TEXT.disabledRejected, "error");
+      } else {
+        showToast(
+          wasFavorite ? FAVORITE_TEXT.removeFailed : FAVORITE_TEXT.addFailed,
+          "error",
+        );
+      }
+    } finally {
+      state.busy = false;
+      paint();
+    }
+  }
+
+  toggle.addEventListener("click", () => {
+    if (!state.busy) {
+      void act();
+    }
+  });
+  paint();
+  row.append(mark, disabledTag, toggle);
+  return row;
+}
 
 function timeToMinute(time) {
   if (!time) {
@@ -253,6 +345,9 @@ export async function render(container, params = {}) {
             class: "meta",
             text: `設備：${(venue.equipment ?? []).join("、") || "無"}`,
           }),
+          "isFavorite" in venue
+            ? favoriteControl(venue, "venue-favorite-toggle")
+            : null,
           h("a", {
             class: "btn sm",
             href: `#/venues/${venue.id}${query}`,
@@ -303,8 +398,9 @@ async function renderCalendarPage(container, params) {
       text: "返回場地列表",
     }),
   );
+  const favSlot = h("div");
   const region = h("div");
-  root.append(region);
+  root.append(favSlot, region);
 
   async function load({ view = "day", date } = {}) {
     region.replaceChildren(
@@ -317,6 +413,11 @@ async function renderCalendarPage(container, params) {
         `/api/venues/${params.venueId}/calendar?${query}`,
       );
       title.textContent = `${calendar.venue.name}（${calendar.venue.location}）`;
+      favSlot.replaceChildren(
+        "isFavorite" in calendar.venue
+          ? favoriteControl(calendar.venue, "calendar-favorite-toggle")
+          : h("span"),
+      );
       renderCalendar(region, calendar, {
         onBook: ({ venueId, date: slotDate, startTime, endTime }) => {
           location.hash = `#/bookings/new?venueId=${venueId}&date=${slotDate}&startTime=${startTime}&endTime=${endTime}`;

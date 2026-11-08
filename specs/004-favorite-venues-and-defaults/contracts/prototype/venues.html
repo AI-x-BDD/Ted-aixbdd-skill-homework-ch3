@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>場地</title>
+    <style>
+      /* 收藏標記與按鈕（UI-01）：窄螢幕可換行，不水平捲動 */
+      .fav-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+      .fav-btn {
+        min-height: 44px;
+      }
+      .fav-btn[aria-pressed="true"] {
+        border-color: var(--accent);
+      }
+      .item .top {
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+    </style>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script src="favorites.js"></script>
+    <script src="waitlist-dialog.js"></script>
+    <script>
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("venues.html");
+        var LOAD_FAIL = P.state === "error" && q.get("kind") === "load"; // 列表或行事曆載入失敗（沿用 001）
+
+        /* ---------- UI-01：收藏標記與按鈕 ---------- */
+        function favControls(v, btnTid) {
+          var mark = h(
+            "span",
+            { class: "tag accent", tid: "venue-favorite-mark" },
+            h("span", { "aria-hidden": "true", text: "★ " }),
+            "已收藏",
+          );
+          var dis = h("span", {
+            class: "tag danger",
+            tid: "venue-favorite-disabled-tag",
+            text: "已停用",
+            hidden: true,
+          });
+          var btn = h("button", {
+            class: "btn sm fav-btn",
+            type: "button",
+            tid: btnTid,
+            "data-id": v.id,
+          });
+          var busy = false,
+            stale = false;
+          function paint() {
+            var on = P.isFav(v.id);
+            mark.hidden = !on;
+            dis.hidden = !stale;
+            btn.setAttribute("aria-pressed", on ? "true" : "false");
+            btn.setAttribute("aria-label", (on ? "取消收藏：" : "加入收藏：") + v.name);
+            if (busy) {
+              btn.disabled = true;
+              btn.setAttribute("aria-busy", "true");
+              btn.textContent = "處理中…";
+              return;
+            }
+            btn.removeAttribute("aria-busy");
+            btn.textContent = on ? "取消收藏" : "加入收藏";
+            btn.disabled = stale && !on; // 已停用的場地不能再加入，已收藏者仍可取消
+          }
+          btn.addEventListener("click", function () {
+            if (busy) return;
+            var want = !P.isFav(v.id);
+            busy = true;
+            paint();
+            P.setFavorite(v.id, want, function (r) {
+              busy = false;
+              if (r.ok) {
+                paint();
+                P.toast(r.fav ? "已加入收藏" : "已取消收藏");
+              } else if (r.reason === "disabled") {
+                stale = true;
+                paint();
+                P.toast("此場地已停用，無法收藏", "error");
+              } else {
+                paint();
+                P.toast(
+                  want
+                    ? "無法加入收藏，收藏狀態沒有改變。請稍後再試一次。"
+                    : "無法取消收藏，收藏狀態沒有改變。請稍後再試一次。",
+                  "error",
+                );
+              }
+              btn.focus();
+            });
+          });
+          paint();
+          return { mark: mark, dis: dis, btn: btn };
+        }
+        var venueId = q.get("id");
+        if (venueId) calendarView();
+        else searchView();
+
+        /* ================= 搜尋與列表 ================= */
+        function searchView() {
+          var root = h("div", { tid: "venue-search" });
+          main.appendChild(root);
+          root.appendChild(P.header("場地"));
+          var f = {
+            date: h("input", {
+              tid: "venue-filter-date",
+              type: "date",
+              value: q.get("date") || "",
+            }),
+            start: P.select(
+              "venue-filter-start",
+              "",
+              [["", "不限"]].concat(P.times(0, 1410)),
+              q.get("start") || "",
+            ),
+            end: P.select(
+              "venue-filter-end",
+              "",
+              [["", "不限"]].concat(P.times(30, 1440)),
+              q.get("end") || "",
+            ),
+            cap: h("input", {
+              tid: "venue-filter-capacity",
+              type: "number",
+              min: "1",
+              inputmode: "numeric",
+              value: q.get("cap") || "",
+            }),
+          };
+          var eqWrap = h("div", {
+            class: "checks",
+            tid: "venue-filter-equipment",
+            role: "group",
+            "aria-label": "設備",
+          });
+          var chosen = (q.get("eq") || "").split(",").filter(Boolean);
+          P.EQUIP.forEach(function (e) {
+            eqWrap.appendChild(
+              h(
+                "label",
+                null,
+                h("input", {
+                  type: "checkbox",
+                  value: e,
+                  checked: chosen.indexOf(e) >= 0,
+                }),
+                e,
+              ),
+            );
+          });
+          var form = h("form", {
+            class: "card",
+            novalidate: true,
+            style: "margin-bottom:16px",
+          });
+          form.appendChild(h("h2", { text: "找場地", style: "margin-top:0" }));
+          var g = h("div", { class: "grid2" });
+          g.appendChild(P.field("日期", f.date));
+          g.appendChild(P.field("開始時間", f.start));
+          g.appendChild(
+            P.field(
+              "結束時間",
+              f.end,
+              "時間以台北時間（UTC+8）顯示",
+              "venue-filter-end-error",
+            ),
+          );
+          g.appendChild(
+            P.field("人數", f.cap, null, "venue-filter-capacity-error"),
+          );
+          form.appendChild(g);
+          form.appendChild(
+            h(
+              "div",
+              { class: "field" },
+              h("span", { class: "lbl", text: "設備" }),
+              eqWrap,
+            ),
+          );
+          form.appendChild(
+            h(
+              "div",
+              { class: "row" },
+              h("button", {
+                class: "btn primary",
+                type: "submit",
+                tid: "venue-filter-submit",
+                text: "搜尋",
+              }),
+              h("button", {
+                class: "btn",
+                type: "button",
+                tid: "venue-filter-reset",
+                text: "清除條件",
+                onclick: function () {
+                  location.href = P.link("venues.html");
+                },
+              }),
+            ),
+          );
+          root.appendChild(form);
+
+          var out = h("div", {
+            tid: "venue-list-region",
+            "aria-live": "polite",
+          });
+          root.appendChild(out);
+
+          function card(v) {
+            var fc = favControls(v, "venue-favorite-toggle");
+            return h(
+              "li",
+              { class: "item", tid: "venue-list-item", "data-id": v.id },
+              h(
+                "div",
+                { class: "top" },
+                h("span", { class: "title", text: v.name }),
+                v.approval
+                  ? h("span", { class: "tag warn", text: "需要審核" })
+                  : null,
+                fc.mark,
+                fc.dis,
+              ),
+              h("div", {
+                class: "meta",
+                text: v.loc + "｜可容納 " + v.cap + " 人",
+              }),
+              h("div", { class: "meta", text: "設備：" + v.eq.join("、") }),
+              h(
+                "div",
+                { class: "fav-row" },
+                h("a", {
+                  class: "btn sm",
+                  tid: "venue-open-calendar",
+                  href: P.link(
+                    "venues.html",
+                    "id=" +
+                      v.id +
+                      (f.date.value ? "&date=" + f.date.value : ""),
+                  ),
+                  text: "查看行事曆",
+                }),
+                fc.btn,
+              ),
+            );
+          }
+          function render(list) {
+            out.innerHTML = "";
+            if (P.state === "loading") {
+              out.setAttribute("aria-busy", "true");
+              out.appendChild(P.skeleton(4, "venue-search-loading"));
+              return;
+            }
+            out.removeAttribute("aria-busy");
+            if (LOAD_FAIL) {
+              out.appendChild(
+                P.stateBox(
+                  "error",
+                  "venue-search-error",
+                  "無法載入場地資料",
+                  "無法載入場地資料。請稍後按「重新載入」再試一次。",
+                  [P.reloadBtn()],
+                ),
+              );
+              return;
+            }
+            if (P.state === "empty") list = [];
+            if (!list.length) {
+              var filtered =
+                f.date.value ||
+                f.start.value ||
+                f.cap.value ||
+                chosen.length ||
+                P.state === "empty";
+              out.appendChild(
+                filtered
+                  ? P.stateBox(
+                      "empty",
+                      "venue-search-empty",
+                      "沒有符合條件的場地",
+                      "請調整日期、時段、人數或設備後再搜尋。",
+                      [
+                        h("button", {
+                          class: "btn",
+                          text: "清除條件",
+                          onclick: function () {
+                            location.href = P.link("venues.html");
+                          },
+                        }),
+                      ],
+                    )
+                  : P.stateBox(
+                      "empty",
+                      "venue-search-empty",
+                      "目前沒有可預約的場地",
+                      "目前沒有可預約的場地。請洽管理員。",
+                    ),
+              );
+              return;
+            }
+            var ul = h("ul", { class: "list", tid: "venue-list" });
+            list.forEach(function (v) {
+              ul.appendChild(card(v));
+            });
+            out.appendChild(ul);
+          }
+          function filtered() {
+            var cap = parseInt(f.cap.value, 10) || 0,
+              picked = [].slice
+                .call(eqWrap.querySelectorAll("input:checked"))
+                .map(function (i) {
+                  return i.value;
+                });
+            return P.activeVenues().filter(function (v) {
+              if (cap && v.cap < cap) return false;
+              if (
+                !picked.every(function (e) {
+                  return v.eq.indexOf(e) >= 0;
+                })
+              )
+                return false;
+              if (f.date.value && f.start.value && f.end.value) {
+                for (
+                  var m = P.min(f.start.value);
+                  m < P.min(f.end.value);
+                  m += 30
+                )
+                  if (P.slotState(v.id, f.date.value, m) !== "free")
+                    return false;
+              }
+              return true;
+            });
+          }
+          form.addEventListener("submit", function (e) {
+            e.preventDefault();
+            var bad = false;
+            if (
+              f.start.value &&
+              f.end.value &&
+              P.min(f.end.value) <= P.min(f.start.value)
+            ) {
+              P.fieldErr(
+                f.end,
+                "時段不正確：結束時間須晚於開始時間。請重新選擇。",
+              );
+              bad = true;
+            } else P.fieldErr(f.end, "");
+            if (f.cap.value && !(parseInt(f.cap.value, 10) >= 1)) {
+              P.fieldErr(f.cap, "人數須為 1 以上的整數。請重新輸入。");
+              bad = true;
+            } else P.fieldErr(f.cap, "");
+            if (bad) return;
+            render(filtered());
+          });
+          render(filtered());
+        }
+
+        /* ================= 行事曆 ================= */
+        function calendarView() {
+          var v = P.venue(venueId) || P.VENUES[0];
+          var view = q.get("view") === "week" ? "week" : "day";
+          var date = q.get("date") || P.NOW.date;
+          if (P.state === "empty") date = "2026-11-08"; // 週日整天不開放
+          var root = h("div", { tid: "venue-calendar" });
+          main.appendChild(root);
+          root.appendChild(
+            h("a", {
+              class: "btn ghost",
+              tid: "calendar-back",
+              href: P.link("venues.html"),
+              text: "返回場地列表",
+            }),
+          );
+          root.appendChild(h("h1", { text: v.name + "（" + v.loc + "）" }));
+          if (P.state !== "loading" && !LOAD_FAIL) {
+            // 載入中與載入失敗時不顯示收藏按鈕
+            var cfc = favControls(v, "calendar-favorite-toggle");
+            root.appendChild(
+              h("div", { class: "fav-row", style: "margin-bottom:8px" }, cfc.mark, cfc.dis, cfc.btn),
+            );
+          }
+          root.appendChild(
+            h("p", {
+              class: "lead",
+              text:
+                "可容納 " +
+                v.cap +
+                " 人｜設備：" +
+                v.eq.join("、") +
+                (v.approval ? "｜需要審核" : "") +
+                "｜時間以台北時間（UTC+8）顯示",
+            }),
+          );
+
+          function nav(opts) {
+            return P.link(
+              "venues.html",
+              "id=" +
+                v.id +
+                "&view=" +
+                (opts.view || view) +
+                "&date=" +
+                (opts.date || date) +
+                (P.state !== "success" ? "&state=" + P.state + (q.get("kind") ? "&kind=" + q.get("kind") : "") : ""),
+            );
+          }
+          var step = view === "week" ? 7 : 1;
+          var bar = h(
+            "div",
+            { class: "row", style: "margin-bottom:8px" },
+            h("a", {
+              class: "btn",
+              tid: "calendar-prev",
+              href: nav({ date: P.addDays(date, -step) }),
+              text: view === "week" ? "前一週" : "前一日",
+            }),
+            h("a", {
+              class: "btn",
+              tid: "calendar-today",
+              href: nav({ date: P.NOW.date }),
+              text: "今天",
+            }),
+            h("a", {
+              class: "btn",
+              tid: "calendar-next",
+              href: nav({ date: P.addDays(date, step) }),
+              text: view === "week" ? "後一週" : "後一日",
+            }),
+            h("input", {
+              tid: "calendar-date",
+              type: "date",
+              value: date,
+              "aria-label": "日期",
+              style:
+                "min-height:44px;padding:0 8px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:inherit",
+              onchange: function (e) {
+                if (e.target.value)
+                  location.href = nav({ date: e.target.value });
+              },
+            }),
+            h(
+              "span",
+              { class: "tabs", style: "margin:0 0 0 auto;border:0" },
+              h("button", {
+                tid: "calendar-view-day",
+                "aria-selected": view === "day",
+                onclick: function () {
+                  location.href = nav({ view: "day" });
+                },
+                text: "日",
+              }),
+              h("button", {
+                tid: "calendar-view-week",
+                "aria-selected": view === "week",
+                onclick: function () {
+                  location.href = nav({ view: "week" });
+                },
+                text: "週",
+              }),
+            ),
+          );
+          root.appendChild(bar);
+          root.appendChild(
+            h("h2", {
+              style: "margin-top:4px",
+              text: P.fmtDate(date) + (view === "week" ? " 起的一週" : ""),
+            }),
+          );
+          root.appendChild(
+            h(
+              "div",
+              { class: "cal-legend" },
+              h("span", { class: "tag", text: "可預約" }),
+              h("span", { class: "tag accent", text: "已預約" }),
+              h("span", { class: "tag maint", text: "維護中" }),
+              h("span", { class: "tag", text: "不開放" }),
+            ),
+          );
+          var out = h("div", { tid: "calendar-region" });
+          root.appendChild(out);
+
+          var LABEL = {
+            free: "可預約",
+            booked: "已預約",
+            maint: "維護中",
+            closed: "不開放",
+          };
+          function slotEl(d, m) {
+            var st = P.slotState(v.id, d, m),
+              s = P.fmtMin(m),
+              e = P.fmtMin(m + 30);
+            var el = h(
+              "div",
+              {
+                class: "slot " + st,
+                role: "group",
+                "aria-label":
+                  v.name +
+                  "，" +
+                  P.fmtDate(d) +
+                  "，" +
+                  s +
+                  "–" +
+                  e +
+                  "，" +
+                  LABEL[st],
+              },
+              h("span", {
+                text: view === "week" ? s + " " + LABEL[st] : LABEL[st],
+              }),
+            );
+            if (st === "free")
+              el.appendChild(
+                h("button", {
+                  tid: "calendar-slot-book",
+                  text: "預約此時段",
+                  onclick: function () {
+                    location.href = P.link(
+                      "booking-form.html",
+                      "venue=" +
+                        v.id +
+                        "&date=" +
+                        d +
+                        "&start=" +
+                        s +
+                        "&end=" +
+                        e,
+                    );
+                  },
+                }),
+              );
+            if (st === "booked")
+              el.appendChild(
+                h("button", {
+                  tid: "calendar-slot-waitlist",
+                  text: "登記候補",
+                  onclick: function (ev) {
+                    P.waitlistDialog(
+                      { venue: v.id, date: d, start: s, end: e },
+                      ev.target,
+                    );
+                  },
+                }),
+              );
+            return el;
+          }
+          if (P.state === "loading") {
+            out.setAttribute("aria-busy", "true");
+            out.appendChild(P.skeleton(8, "venue-calendar-loading"));
+            return;
+          }
+          if (LOAD_FAIL) {
+            out.appendChild(
+              P.stateBox(
+                "error",
+                "venue-calendar-error",
+                "無法載入場地資料",
+                "無法載入場地資料。請稍後按「重新載入」再試一次。",
+                [P.reloadBtn()],
+              ),
+            );
+            return;
+          }
+          function rangeOf(d) {
+            return P.openRange(d) || null;
+          }
+          if (view === "day") {
+            var o = rangeOf(date);
+            if (!o) {
+              out.appendChild(
+                P.stateBox(
+                  "empty",
+                  "venue-calendar-empty",
+                  "這一天不開放預約",
+                  "這一天不開放預約。請改看其他日期。",
+                ),
+              );
+              return;
+            }
+            var grid = h("div", { class: "day-grid" });
+            for (var m = o[0]; m < o[1]; m += 30)
+              grid.appendChild(
+                h(
+                  "div",
+                  { class: "day-row" },
+                  h("span", { text: P.fmtMin(m) }),
+                  slotEl(date, m),
+                ),
+              );
+            out.appendChild(grid);
+          } else {
+            var wk = h("div", { class: "week-grid" }),
+              anyOpen = false;
+            for (var i = 0; i < 7; i++) {
+              var d = P.addDays(date, i),
+                o2 = rangeOf(d),
+                col = h(
+                  "div",
+                  { class: "week-day" },
+                  h("h3", { text: P.fmtShort(d) }),
+                ),
+                slots = h("div", { class: "slots" });
+              if (!o2)
+                slots.appendChild(
+                  h("div", { class: "slot closed", text: "不開放" }),
+                );
+              else {
+                anyOpen = true;
+                for (var mm = o2[0]; mm < o2[1]; mm += 30)
+                  slots.appendChild(slotEl(d, mm));
+              }
+              col.appendChild(slots);
+              wk.appendChild(col);
+            }
+            if (!anyOpen) {
+              out.appendChild(
+                P.stateBox(
+                  "empty",
+                  "venue-calendar-empty",
+                  "這一天不開放預約",
+                  "這一天不開放預約。請改看其他日期。",
+                ),
+              );
+              return;
+            }
+            out.appendChild(wk);
+          }
+        }
+      })();
+    </script>
+  </body>
+</html>

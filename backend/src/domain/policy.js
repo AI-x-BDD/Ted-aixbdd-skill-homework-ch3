@@ -33,6 +33,7 @@ export function can(user, action, resource) {
     action === "auth:self" ||
     action === "booking:create" ||
     action === "booking:list-own" ||
+    action === "favorite:manage" ||
     action === "series:create" ||
     action === "waitlist:own"
   ) {

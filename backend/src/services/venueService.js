@@ -4,6 +4,7 @@ import { addTaipeiDays } from "../domain/bookingRules.js";
 import { can } from "../domain/policy.js";
 import { withTransaction } from "../db/pool.js";
 import { HttpError } from "../lib/http.js";
+import * as favoriteRepository from "../repositories/favoriteRepository.js";
 import * as ruleRepository from "../repositories/ruleRepository.js";
 import * as slotRepository from "../repositories/slotRepository.js";
 import * as userRepository from "../repositories/userRepository.js";
@@ -13,6 +14,22 @@ function requireManage(user) {
   if (!can(user, "venue:manage")) {
     throw new HttpError(403, "你沒有權限使用這個功能。請洽管理員。");
   }
+}
+
+async function loadFavorites(conn, user) {
+  try {
+    return await favoriteRepository.listVenueIds(conn, user.id);
+  } catch (error) {
+    console.error("讀取收藏失敗，回應省略 isFavorite", error);
+    return null;
+  }
+}
+
+function withFavorite(venue, favorites) {
+  if (!favorites) {
+    return venue;
+  }
+  return { ...venue, isFavorite: favorites.has(Number(venue.id)) };
 }
 
 function timeToMinute(time) {
@@ -182,7 +199,6 @@ export function toPublic(venue) {
 }
 
 export async function searchVenues(user, query = {}) {
-  void user;
   const { date, startTime, endTime, capacity, equipment } = query;
   if ((startTime || endTime) && !date) {
     throw new HttpError(400, "請先選擇日期再篩選時段。", {
@@ -282,6 +298,7 @@ export async function searchVenues(user, query = {}) {
         return false;
       });
     }
+    const favorites = await loadFavorites(conn, user);
     const options = new Set();
     const all = await venueRepository.listActive(conn);
     for (const venue of all) {
@@ -290,7 +307,7 @@ export async function searchVenues(user, query = {}) {
       }
     }
     return {
-      items: items.map(toPublic),
+      items: items.map((venue) => withFavorite(toPublic(venue), favorites)),
       equipmentOptions: [...options].sort(),
     };
   });
@@ -301,7 +318,6 @@ export async function getVenueCalendar(
   venueId,
   { date, view = "day" } = {},
 ) {
-  void user;
   const current = now();
   const today = toTaipeiParts(current).date;
   const target = date || today;
@@ -326,6 +342,7 @@ export async function getVenueCalendar(
       from = toTaipeiParts(monday).date;
       to = toTaipeiParts(new Date(monday.getTime() + 6 * 86400000)).date;
     }
+    const favorites = await loadFavorites(conn, user);
     const days = [];
     let cursor = from;
     while (cursor <= to) {
@@ -390,11 +407,14 @@ export async function getVenueCalendar(
       ).date;
     }
     return {
-      venue: {
-        id: Number(venue.id),
-        name: venue.name,
-        location: venue.location,
-      },
+      venue: withFavorite(
+        {
+          id: Number(venue.id),
+          name: venue.name,
+          location: venue.location,
+        },
+        favorites,
+      ),
       today,
       view,
       from,

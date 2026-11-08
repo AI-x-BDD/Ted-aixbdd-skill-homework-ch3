@@ -127,3 +127,36 @@ export const ALT_TEXT = {
   appliedVenue: (name, submitLabel) =>
     `已改為「${name}」，尚未送出。請確認後按「${submitLabel}」。`,
 };
+
+// 004 收藏場地（ui-contract.md › UI-01、UI-02 › 文案與無障礙）
+export const FAVORITE_TEXT = {
+  addButton: "加入收藏",
+  removeButton: "取消收藏",
+  pending: "處理中…",
+  favoriteMark: "已收藏",
+  disabledTag: "已停用",
+  addedToast: "已加入收藏",
+  removedToast: "已取消收藏",
+  disabledRejected: "此場地已停用，無法收藏",
+  addFailed: "無法加入收藏，收藏狀態沒有改變。請稍後再試一次。",
+  removeFailed: "無法取消收藏，收藏狀態沒有改變。請稍後再試一次。",
+  addLabel: (name) => `加入收藏：${name}`,
+  removeLabel: (name) => `取消收藏：${name}`,
+  venueLabel: "場地",
+  venuePlaceholder: "請選擇場地",
+  venueRequired: "請選擇場地。",
+  groupFavorites: "我的收藏",
+  groupOthers: "其他場地",
+  optionText: (name, location) => `${name}（${location}）`,
+  favoritesLoadFailed: "無法載入我的收藏，場地清單暫以一般順序顯示。",
+};
+
+// 004 預約表單預填（ui-contract.md › UI-03 › 文案與無障礙）
+export const DEFAULTS_TEXT = {
+  attendeesHint: "已帶入上次預約的人數，可自行修改。",
+  endHint: (duration) => `已依上次的時長 ${duration} 帶出，可自行修改。`,
+  notFitHint: (duration) =>
+    `上次的時長（${duration}）套用後超出可預約範圍，請自行選擇結束時間。`,
+  loadFailed: "無法載入上次的人數與時長，請自行填寫。",
+  timePlaceholder: "請選擇",
+};

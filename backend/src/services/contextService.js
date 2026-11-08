@@ -4,6 +4,7 @@ import { addTaipeiDays } from "../domain/bookingRules.js";
 import { can } from "../domain/policy.js";
 import { withTransaction } from "../db/pool.js";
 import { HttpError } from "../lib/http.js";
+import * as bookingDefaultsRepository from "../repositories/bookingDefaultsRepository.js";
 import * as bookingRepository from "../repositories/bookingRepository.js";
 import * as eventRepository from "../repositories/eventRepository.js";
 import * as ruleRepository from "../repositories/ruleRepository.js";
@@ -26,14 +27,13 @@ function ruleValues(snapshot) {
 }
 
 export async function getContext(user, current = now()) {
-  void user;
   return withTransaction(async (conn) => {
     const snapshot = await ruleRepository.loadAll(conn);
     const today = toTaipeiParts(current).date;
     const until = user.suspended_until_at
       ? new Date(user.suspended_until_at)
       : null;
-    return {
+    const result = {
       now: toIso(current),
       today,
       maxBookableDate: addTaipeiDays(
@@ -43,6 +43,16 @@ export async function getContext(user, current = now()) {
       rules: ruleValues(snapshot),
       suspendedUntil: until && until > current ? toIso(until) : null,
     };
+    // 本人預設值（004）：讀取失敗時整個省略 bookingDefaults，其餘欄位照常回傳
+    try {
+      result.bookingDefaults = await bookingDefaultsRepository.findByUser(
+        conn,
+        user.id,
+      );
+    } catch (error) {
+      console.error("讀取預約預設值失敗，回應省略 bookingDefaults", error);
+    }
+    return result;
   });
 }
 

@@ -1,0 +1,1008 @@
+openapi: 3.1.0
+info:
+  title: 場地／會議室預約系統 API（004 我的收藏場地與常用預設值增量）
+  version: 1.3.0
+  description: |
+    本檔是 001-venue-booking、002-rebook-reservation、003-conflict-alternatives 後端 API 在「我的收藏場地與常用預設值」功能下的增量契約，只收錄本功能前端（UI-01、UI-02、UI-03）會呼叫、且契約有新增或變動的六個操作：加入收藏、取消收藏（新增，plan.md API-01）、搜尋場地與取得場地行事曆（回應多 isFavorite，API-01）、取得目前台北日期與規則值（回應多 bookingDefaults，API-02）、建立單次預約（成功後更新預設值，API-03）。每個操作的請求、成功回應與全部錯誤都在本檔完整寫出；其餘操作（登入、取得目前使用者、取得單筆預約、修改預約、取消預約、週期性預約、候補等）行為不變，沿用 001、002、003 的契約，本檔不重複。
+
+    本功能新增兩個端點與兩張資料表（favorite_venues、booking_defaults），並在三個既有回應加上選用欄位；既有欄位與既有請求格式不變，不認識新欄位的舊版前端忽略即可。
+
+    共通約定（與 001、002、003 相同）：
+    - 認證：登入後由伺服器設定 HttpOnly cookie `sid`。除登入外所有操作都需登入，未登入回 401。帳號被標示為須先改密碼（mustChangePassword）時一律 403，訊息為「請先設定新密碼」。非 GET 請求須為 application/json，且帶有 Origin 標頭時必須屬於允許的來源，否則 403。
+    - 角色與授權：所有帳號皆具備 employee。收藏的加入與取消對所有已登入且啟用中的帳號開放（授權動作 `favorite:manage`），預約權限被暫停的帳號仍可操作收藏。授權以伺服器為準，略過畫面直接送出也會被拒絕。
+    - 個人資料界線（NFR-002）：收藏與預設值只屬於目前登入者本人。本檔所有操作的路徑、查詢與請求本文都不接受員工編號；身分唯一來源是階段憑證所對應的使用者，因此不存在「以他人名義」讀寫收藏或預設值的入口，回應也不會出現他人的收藏或預設值。
+    - 時間格式（C-SH-02）：回應與資料結構中所有時間點屬性（名稱以 At 結尾，例如 startAt、endAt、now）一律為 `type: string`、`format: date-time` 的帶 Z 的 ISO 8601 UTC 字串，例如 `2026-11-20T02:00:00.000Z`。使用者輸入的預約時間與查詢時間一律為台北當地（UTC+8）的 `date`（YYYY-MM-DD）加 `startTime`、`endTime`（HH:mm），不接受帶時區或偏移量的時間戳，由伺服器轉為 UTC。結束時間可為 `24:00`（表示當日結束）；開始時間最晚 `23:30`。x-inner-needs 中表示時間點的資料欄位一律以 `_at` 結尾且為 UTC（例如 start_at、slot_start_at、created_at、updated_at）；`open_minute`、`close_minute` 為台北當地一天內的分鐘數，`duration_minutes` 為分鐘數，皆不是時間點。回應給畫面顯示的錯誤訊息若含時間，一律以台北時間（UTC+8）書寫。
+    - 狀態代碼（C-SH-01）：預約狀態（BookingStatus）為 pending、confirmed、checked_in、completed、rejected、cancelled、no_show，為英文 snake_case 代碼，與資料庫 CHECK 清單及前端 shared/src/copy.js 逐字相同，中文名稱只作顯示文案。本功能的收藏與預設值與預約狀態代碼無關；建立單次預約成功時的狀態只會是 pending（場地需審核）或 confirmed（場地不需審核），兩者都算「成立」而更新預設值。
+    - 「現在」一律由伺服器判定：時段是否已過去、可預約的最遠日都以伺服器時間計算，前端不以裝置時鐘判斷。
+    - 錯誤：失敗回應一律為 Error 結構，訊息為繁體中文，說明發生什麼事與可以怎麼做，不含內部代碼或技術細節。狀態碼：400 格式或規則驗證未通過、401 未登入、403 無權限、404 資源不存在、409 與目前狀態衝突、500 伺服器端非預期失敗。預約規則驗證分兩類：僅依請求內容與目前時間即可判定的規則（time_unit、end_not_after_start、duration、past、advance、opening_hours、capacity）未通過時回 400；需讀取資料庫狀態才能判定的規則（occupied、quota、suspended、venue_inactive）未通過時回 409。同一請求出現多項未通過時，在同一個狀態碼下以 violations 全部列出；兩類並存時回 400，並把 409 類規則一併列入同一份 violations。
+    - 儲存失敗不影響預約（NFR-001）：收藏與預設值是便利功能。讀取端（搜尋場地、行事曆、取得規則值）取不到收藏或預設值時，其餘資料照常回傳，對應的選用欄位（isFavorite、bookingDefaults）整個省略，前端據此降級（場地選單不分組、不預填），不得讓場地列表、行事曆或規則值整個失敗。寫入端（建立預約後寫入預設值）失敗時預約照常成立。
+    - 本檔未列出僅供測試使用的 /__test/clock、/__test/tick。
+  x-common-inner-needs:
+    description: 所有需登入的操作在授權前都會做階段驗證，這些讀寫不在各操作的 x-inner-needs 重複列出，資料庫端需涵蓋。
+    data:
+      - name: sessions
+        access: read
+        fields: [token_hash, user_id, expires_at]
+      - name: sessions
+        access: write
+        fields: [expires_at]
+      - name: users
+        access: read
+        fields: [id, is_active, must_change_password, suspended_until_at]
+      - name: user_roles
+        access: read
+        fields: [user_id, role]
+    files: []
+servers:
+  - url: http://127.0.0.1:3000
+    description: 本機後端（正式環境同一行程也提供前端靜態檔）
+tags:
+  - name: 場地收藏
+  - name: 場地搜尋與行事曆
+  - name: 系統
+  - name: 預約
+security:
+  - cookieAuth: []
+paths:
+  /api/venues/{venueId}/favorite:
+    put:
+      tags: [場地收藏]
+      summary: 加入收藏
+      operationId: addFavoriteVenue
+      description: |
+        對應 UI-01「加入收藏」「場地已停用時加入收藏被拒絕」「收藏操作失敗」（查詢結果 `venue-favorite-toggle` 與行事曆 `calendar-favorite-toggle` 共用同一個操作），語意為「把這個場地設為本人已收藏」，因此重複送出結果相同。所有已登入角色可呼叫，只能為本人加入。
+
+        流程：
+        1. 場地不存在回 404。
+        2. 場地已停用回 409，訊息為「此場地已停用，無法收藏。」，並在 violations 列出 `venue_inactive`；收藏狀態不變。前端據此顯示「此場地已停用，無法收藏」並標示「已停用」。
+        3. 其餘情形寫入本人對該場地的收藏；若本人早已收藏同一場地，視為成功且不產生第二筆（唯一性由 (user_id, venue_id) 主鍵保證），重複點擊或兩次請求併發的最終結果都是已收藏（US1-9、NFR-001）。
+        4. 成功回 200 與目前的收藏狀態 `{ venueId, isFavorite: true }`。收藏數量不設上限，不因數量而拒絕（US1-13）。
+        5. 寫入失敗回 500，收藏狀態不改變，不留下部分更新。
+
+        預約權限被暫停的帳號仍可加入收藏；場地的可預約性、設備與其他員工的收藏都不受影響。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: read
+            fields: [id, is_active]
+          - name: favorite_venues
+            access: write
+            fields: [user_id, venue_id, created_at]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+      responses:
+        "200":
+          description: 已收藏（含早已收藏的重複加入），回傳目前的收藏狀態
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FavoriteState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 場地已停用，無法新增收藏（venue_inactive）；收藏狀態不變
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                venueInactive:
+                  summary: 頁面開著期間場地被停用
+                  value:
+                    message: 此場地已停用，無法收藏。
+                    violations:
+                      - rule: venue_inactive
+                        message: 此場地已停用，無法收藏。
+        "500":
+          description: 伺服器端寫入失敗，收藏狀態沒有改變
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                storageFailed:
+                  summary: 收藏寫入失敗
+                  value:
+                    message: 無法加入收藏，收藏狀態沒有改變。請稍後再試一次。
+    delete:
+      tags: [場地收藏]
+      summary: 取消收藏
+      operationId: removeFavoriteVenue
+      description: |
+        對應 UI-01「取消收藏」「收藏操作失敗」（查詢結果與行事曆共用），語意為「把這個場地設為本人未收藏」，因此重複送出結果相同、不報錯。所有已登入角色可呼叫，只能取消本人的收藏。
+
+        流程：
+        1. 刪除本人對該場地的收藏；本人原本就沒有收藏、或場地不存在（不可能有收藏）時，同樣視為成功（US1-9、NFR-001）。
+        2. 不檢查場地是否啟用：場地已停用時仍可取消收藏，讓員工在停用期間也能整理自己的收藏；停用不會刪除既有收藏，因此場地重新啟用後收藏自動恢復顯示（FR-006）。
+        3. 成功回 200 與目前的收藏狀態 `{ venueId, isFavorite: false }`。
+        4. 刪除失敗回 500，收藏狀態不改變。
+      x-inner-needs:
+        data:
+          - name: favorite_venues
+            access: delete
+            fields: [user_id, venue_id]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+      responses:
+        "200":
+          description: 已是未收藏（含原本就未收藏的重複取消），回傳目前的收藏狀態
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FavoriteState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: 伺服器端刪除失敗，收藏狀態沒有改變
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                storageFailed:
+                  summary: 收藏刪除失敗
+                  value:
+                    message: 無法取消收藏，收藏狀態沒有改變。請稍後再試一次。
+  /api/venues:
+    get:
+      tags: [場地搜尋與行事曆]
+      summary: 搜尋啟用中的場地（每個場地附本人是否已收藏）
+      operationId: searchVenues
+      description: |
+        對應 UI-01「看見收藏標記」（場地查詢結果）與 UI-02「開啟場地選單並選場地」「沒有收藏時維持原樣」「收藏載入失敗時的降級」（預約表單、週期性預約與登記候補的啟用中場地列表，前端自行依 isFavorite 分組與排序）；同一份列表也供 UI-03 取得所選場地的開放時段（openingHours）以判斷帶出的結束時間是否落在開放時段內。所有已登入角色可呼叫。只回傳啟用中的場地（已停用場地不在列表內，其收藏紀錄由資料庫保留，場地重新啟用後自動回到列表並仍標示已收藏）；不帶條件時列出全部啟用場地，順序沿用 001（依場地名稱），不因收藏而改變順序或篩選結果。
+        篩選規則（沿用 001，行為不變）：給 date 與 startTime、endTime 時，只列出該時段完全可預約的場地（啟用、完全落在開放時段內、未過去、未超過最遠可預約日、沒有有效預約／候補保留／維護時段占用）；只給 date 時，列出當日至少有一個可預約時段的場地；給了時間卻沒給 date 回 400。capacity 為最小容納人數；equipment 可重複，場地須具備所有指定設備。startTime、endTime 須成對出現，結束須晚於開始，否則 400 並在 fields 標示。
+        回應另附 equipmentOptions（啟用中場地出現過的設備名稱，供篩選勾選）。
+
+        本功能的變動：每個場地多一個選用欄位 `isFavorite`，表示目前登入者本人是否已收藏該場地，只依本人的收藏計算，不含任何其他員工的收藏（NFR-002）。讀取本人的收藏失敗時，場地列表照常回傳，所有場地的 `isFavorite` 一律省略（不是 false），前端視為「收藏載入失敗」並降級為不分組（NFR-001）。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: read
+            fields:
+              [
+                id,
+                name,
+                location,
+                capacity,
+                equipment,
+                requires_approval,
+                is_active,
+              ]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: booking_slots
+            access: read
+            fields: [venue_id, slot_start_at]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+          - name: favorite_venues
+            access: read
+            fields: [user_id, venue_id]
+        files: []
+      parameters:
+        - name: date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: startTime
+          in: query
+          schema:
+            $ref: "#/components/schemas/TimeOfDay"
+        - name: endTime
+          in: query
+          schema:
+            $ref: "#/components/schemas/EndTimeOfDay"
+        - name: capacity
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - name: equipment
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        "200":
+          description: 符合條件的啟用場地（可為空陣列），每個場地附本人是否已收藏
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VenueList"
+        "400":
+          description: 篩選條件不合法（結束不晚於開始、只給時間沒給日期、人數不是正整數），欄位放在 fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                timeWithoutDate:
+                  summary: 只給時間沒給日期
+                  value:
+                    message: 請先選擇日期，再指定時間。
+                    fields:
+                      - field: date
+                        message: 請選擇日期。
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/venues/{venueId}/calendar:
+    get:
+      tags: [場地搜尋與行事曆]
+      summary: 取得場地日／週行事曆（場地資訊附本人是否已收藏）
+      operationId: getVenueCalendar
+      description: |
+        對應 UI-01「看見收藏標記」「加入收藏」「取消收藏」在行事曆頁頭（`calendar-favorite-toggle`）需要的場地收藏狀態。所有已登入角色可呼叫。回傳 date 所在日（view=day）或所在週一至週日（view=week）每天 48 個 30 分鐘時段的狀態，不含預約者與主題。
+        時段狀態判定優先序（沿用 001，行為不變）：closed（不在開放時段內、開始時間早於現在、超過最遠可預約日）、maintenance（維護時段）、booked（有效預約或候補保留）、available（可預約）。已過去的時段一律為 closed，不論原本是否被預約。回應含目前台北日期與每天的開放區間，前端可用來裁切與判斷整天不開放。啟用中的場地才有行事曆，停用或不存在回 404。
+
+        本功能的變動：`venue` 多一個選用欄位 `isFavorite`，表示目前登入者本人是否已收藏該場地，只依本人的收藏計算。讀取收藏失敗時行事曆照常回傳並省略 `isFavorite`，前端不顯示收藏按鈕（NFR-001）。與場地查詢結果共用同一份收藏，行事曆上的收藏與查詢結果上的效果相同（US1-2）。
+      x-inner-needs:
+        data:
+          - name: venues
+            access: read
+            fields: [id, name, location, is_active]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: booking_slots
+            access: read
+            fields: [venue_id, slot_start_at, holder_type]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+          - name: favorite_venues
+            access: read
+            fields: [user_id, venue_id]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/venueId"
+        - name: date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: view
+          in: query
+          schema:
+            type: string
+            enum: [day, week]
+            default: day
+      responses:
+        "200":
+          description: 行事曆，venue 附本人是否已收藏
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Calendar"
+        "400":
+          description: 日期格式不正確
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                badDate:
+                  summary: 日期格式不正確
+                  value:
+                    message: 日期格式不正確。請重新選擇日期。
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在或已停用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                venueGone:
+                  summary: 場地已停用
+                  value:
+                    message: 找不到這個場地，可能已停用。請回到場地列表重新選擇。
+  /api/context:
+    get:
+      tags: [系統]
+      summary: 取得目前台北日期、公開規則值與本人的預約預設值
+      operationId: getContext
+      description: |
+        對應 UI-03「一般開啟單次預約表單時預填人數」「選定開始時間後依時長帶出結束時間」「套不上時不帶出結束時間」「預設值載入失敗時的降級」對預設值的需要，以及 001 UI-02、UI-03、UI-04、UI-05 對「目前台北日期」與規則值的需要：伺服器目前時間、台北今天日期、最遠可預約日期（今天加最遠可預約天數），以及表單與對話框說明文字用到的規則值（含單次時長上限 maxDurationMinutes，UI-03 以它判斷記住的時長是否超過現行上限）。所有已登入角色可呼叫，須先改密碼的帳號不可。
+
+        本功能的變動：回應多一個選用欄位 `bookingDefaults`，為目前登入者本人記住的人數與時長（取自最近一次成功建立的單次預約，每位員工只有一份）。
+        - 本人從未成功建立單次預約：`bookingDefaults` 為 null，前端不預填人數、不帶出結束時間（FR-012）。
+        - 本人有記住的值：`bookingDefaults` 為 `{ attendees, durationMinutes }`；時長一律是 30 的倍數的分鐘數，不因場地、規則調降或後來的取消、修改而改變。伺服器照實回傳記住的值，不做「是否超過現行上限」的判斷，由前端比對 `rules.maxDurationMinutes`。
+        - 讀取預設值失敗：其餘欄位照常回傳，`bookingDefaults` 整個省略（不是 null），前端視同從未預約並顯示「無法載入上次的人數與時長」（NFR-001）。
+        只回傳本人的預設值，不接受員工編號參數，也不回傳他人的預設值（NFR-002、US2-12）。員工的帳號被停用後重新啟用，預設值維持原樣。
+      x-inner-needs:
+        data:
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+          - name: booking_defaults
+            access: read
+            fields: [user_id, attendees, duration_minutes]
+        files: []
+      responses:
+        "200":
+          description: 目前時間、規則值與本人的預約預設值
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Context"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/bookings:
+    post:
+      tags: [預約]
+      summary: 建立單次預約（一般預約與再預約共用；成功後更新本人的預設值）
+      operationId: createBooking
+      description: |
+        對應 UI-03「送出後預設值的更新」，也是 001 UI-03「送出單次預約」、002 UI-02「送出再預約」與 003 UI-01、UI-02 的同一個操作。一般預約與再預約在後端沒有差異（請求不含來源預約識別），因此「再預約一次」成功時同樣更新預設值（FR-008）。所有已登入角色皆以一般員工身分為自己預約。預填值（人數、依時長帶出的結束時間）只是前端的便利，送出時與手動輸入的值一視同仁，由本操作的規則檢查把關；預填人數超過所選場地容納人數時回 `capacity` 違規（FR-013、SC-004）。
+
+        預約流程（沿用 001、003，行為不變）：
+        1. 驗證主題（必填、至多 100 字）與人數（1 以上整數），不合法回 400 並在 fields 列出。
+        2. 讀取場地（不存在回 404、已停用回 409 venue_inactive，兩者都不附建議）。
+        3. 以純函式一次收集 time_unit、end_not_after_start、duration、past、advance、opening_hours、capacity 的違規。
+        4. 在交易內鎖使用者列，檢查預約權限暫停（suspended，訊息含台北時間的解除時間）與持有上限（quota），兩者都檢查、都列出。
+        5. 時段占用以唯讀方式判定：time_unit、end_not_after_start 未通過時略過；否則查詢所選場地在所選區間內是否已有時段占用（有效預約、候補保留、維護時段，皆在同一張時段占用表），有則在 violations 追加 `occupied`。
+        6. 若 violations 非空，整個交易不寫入任何資料，依下列規則回應。若 violations 為空才寫入預約與 30 分鐘時段占用；寫入時若因併發而主鍵衝突（兩人幾乎同時送出），回滾後同樣回 409 occupied，並在新的唯讀交易內以最新占用狀況計算 suggestions。
+        狀態碼：violations 中只要有 400 類規則就回 400，否則有 409 類規則回 409；同一份 violations 全部列出，順序為 400 類在前。成立時：不需審核的場地為 confirmed，需審核的場地為 pending 並先占用時段；新預約的 series_id 為空，不屬於任何週期性預約批次；通知與操作紀錄同 001、002。
+
+        `suggestions` 的出現條件（沿用 003）：只有當 violations 恰好只有 `occupied` 一項（回 409 且唯一未通過的規則是時段被占用）時才附上，內容為同場地同一台北日期、長度相同的前後最近各一個空檔（`slots`，不跨日，兩個方向都沒有時 `noSlotsToday` 為 true）與最多 5 個其他可用場地（`venues`，不需審核者在前，各自依場地名稱排序）；其他任何情形都不附。`suggestions` 只含時間點與場地公開欄位，不含占用者、預約主題或人數。
+
+        預設值的更新（本功能新增，FR-008、FR-009、NFR-001）：
+        - 時機：預約寫入交易成功提交、取得新預約之後、回應之前。只有本操作會寫入預設值，因此預約被拒絕（本操作在提交前就回 400／404／409）、員工放棄表單、修改預約（updateBooking）、取消預約、建立週期性預約（createBookingSeries）與確認候補遞補（confirmWaitlistEntry）都不會更新預設值（SC-005）；它們不經過本操作，也不需要任何額外判斷。
+        - 內容：以本次請求的人數 `attendees` 與時長 `durationMinutes`（`endTime` 減 `startTime` 的分鐘數，`24:00` 以 1440 分鐘計）取代本人先前的預設值，每位員工只保留一份；pending 與 confirmed 都算成立而更新。取消這筆預約之後預設值維持不變，不回溯到更早的預約。
+        - 失敗不影響預約：預設值在獨立的連線與交易中寫入，寫入失敗時只記錄錯誤，預約仍回 201 成立、也不留下部分更新的預設值。
+        - 重複送出：連續快速送出同一份預約時，預約的重複保證沿用 001（只建立一筆，後送者回 409 occupied）；預設值以本人為唯一鍵取代，天然冪等，記住的是成立的那一筆（US2-13）。兩個裝置幾乎同時成功建立預約時，最後寫入者勝出。
+        - 回應不含預設值；前端不自行保存或更新預設值，下次開啟表單時由 `GET /api/context` 取得。
+      x-inner-needs:
+        data:
+          - name: users
+            access: read
+            fields: [id, suspended_until_at]
+          - name: venues
+            access: read
+            fields: [id, name, capacity, requires_approval, is_active]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+          - name: bookings
+            access: read
+            fields: [user_id, status, start_at, end_at, series_id]
+          - name: bookings
+            access: write
+            fields:
+              [
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                status,
+                series_id,
+                late_cancel,
+                confirmed_at,
+                reminder_sent_at,
+              ]
+          - name: booking_slots
+            access: read
+            fields: [venue_id, slot_start_at]
+          - name: booking_slots
+            access: write
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, created_at]
+          - name: booking_defaults
+            access: write
+            fields: [user_id, attendees, duration_minutes, updated_at]
+        files: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingInput"
+      responses:
+        "201":
+          description: 預約已成立（confirmed）或已送出等待審核（pending）；本人的預約預設值已更新為這筆預約的人數與時長（更新失敗時預約仍成立）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "400":
+          description: |
+            未通過的規則（violations：time_unit、end_not_after_start、duration、past、advance、opening_hours、capacity）或欄位錯誤（fields：subject、attendees）。若同時有時段被占用、持有上限或預約權限暫停，也一併列在同一份 violations；本情形一律不附 suggestions。預約被拒絕，預設值不更新
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                prefilledAttendeesOverCapacity:
+                  summary: 預填的人數超過所選場地容納人數
+                  value:
+                    message: 人數超過容納人數（可容納 6 人）。請減少人數或改選其他場地。
+                    violations:
+                      - rule: capacity
+                        message: 人數超過容納人數（可容納 6 人）。請減少人數或改選其他場地。
+                occupiedWithCapacity:
+                  summary: 時段被占用，同時人數超過容納人數
+                  value:
+                    message: 人數超過容納人數（可容納 4 人）。請減少人數或改選其他場地。
+                    violations:
+                      - rule: capacity
+                        message: 人數超過容納人數（可容納 4 人）。請減少人數或改選其他場地。
+                      - rule: occupied
+                        message: 該時段已被占用。請改選其他時段，或登記候補。
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                venueGone:
+                  summary: 場地不存在
+                  value:
+                    message: 找不到這個場地。請重新整理後再選擇場地。
+        "409":
+          description: |
+            時段已被占用（occupied）、已達持有上限（quota）、預約權限暫停（suspended，訊息含台北時間的解除時間）、場地已停用（venue_inactive）。violations 只有 occupied 一項時附 suggestions；occupied 與 quota 或 suspended 並列時不附；venue_inactive 不附。預約被拒絕，預設值不更新（SC-005）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                occupiedWithSuggestions:
+                  summary: 只有時段被占用，附同場地空檔與其他可用場地
+                  value:
+                    message: 該時段已被占用。請改選其他時段，或登記候補。
+                    violations:
+                      - rule: occupied
+                        message: 該時段已被占用。請改選其他時段，或登記候補。
+                    suggestions:
+                      slots:
+                        before:
+                          startAt: "2026-11-20T01:00:00.000Z"
+                          endAt: "2026-11-20T02:00:00.000Z"
+                        after:
+                          startAt: "2026-11-20T03:00:00.000Z"
+                          endAt: "2026-11-20T04:00:00.000Z"
+                      noSlotsToday: false
+                      venues:
+                        - venueId: 3
+                          name: 星河會議室
+                          capacity: 10
+                          requiresApproval: false
+                occupiedWithQuota:
+                  summary: 時段被占用，同時已達持有上限（不附建議）
+                  value:
+                    message: 該時段已被占用。請改選其他時段，或登記候補。
+                    violations:
+                      - rule: occupied
+                        message: 該時段已被占用。請改選其他時段，或登記候補。
+                      - rule: quota
+                        message: 已達持有上限（最多 5 筆）。請先取消或等待既有預約結束後再預約。
+                venueInactive:
+                  summary: 場地已停用
+                  value:
+                    message: 這個場地已停用，無法預約。請改為一般預約，選擇其他場地。
+                    violations:
+                      - rule: venue_inactive
+                        message: 這個場地已停用，無法預約。請改為一般預約，選擇其他場地。
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: sid
+      description: 登入後由伺服器設定的 HttpOnly 階段憑證
+  responses:
+    Unauthorized:
+      description: 未登入或登入已逾時
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            notLoggedIn:
+              summary: 未登入
+              value:
+                message: 登入已逾時。請重新登入。
+    Forbidden:
+      description: 沒有權限、必須先改密碼（訊息「請先設定新密碼」），或請求來源不被允許
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            mustChangePassword:
+              summary: 須先改密碼
+              value:
+                message: 請先設定新密碼。
+  parameters:
+    venueId:
+      name: venueId
+      in: path
+      required: true
+      schema:
+        type: integer
+  schemas:
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: 繁體中文，說明發生什麼與可以怎麼做，不含內部代碼或技術細節，也不透露占用時段者是誰、其預約主題或人數，不含任何他人的收藏或預設值；訊息中的時間以台北時間（UTC+8）書寫
+          examples:
+            - 此場地已停用，無法收藏。
+            - 無法加入收藏，收藏狀態沒有改變。請稍後再試一次。
+            - 無法取消收藏，收藏狀態沒有改變。請稍後再試一次。
+            - 找不到這個場地。請重新整理後再選擇場地。
+            - 人數超過容納人數（可容納 4 人）。請減少人數或改選其他場地。
+            - 該時段已被占用。請改選其他時段，或登記候補。
+            - 已達持有上限（最多 5 筆）。請先取消或等待既有預約結束後再預約。
+            - 您的預約權限已暫停，將於 2026-11-12 08:00 解除。解除前仍可報到、取消與修改既有預約。
+            - 請先設定新密碼。
+        fields:
+          type: array
+          description: 欄位層級的錯誤，供前端標示在欄位下方
+          items:
+            $ref: "#/components/schemas/FieldError"
+        violations:
+          type: array
+          description: 未通過的規則清單，每項含規則代號與說明；同一次請求的全部未通過規則並列於此，包含 occupied；加入收藏遇到已停用場地時列出 venue_inactive
+          items:
+            $ref: "#/components/schemas/Violation"
+        suggestions:
+          $ref: "#/components/schemas/Suggestions"
+    FieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          description: 對應請求欄位名稱，例如 subject、attendees、date
+        message:
+          type: string
+    Violation:
+      type: object
+      required: [rule, message]
+      properties:
+        rule:
+          type: string
+          description: 規則代號；畫面依代號決定文案。400 類：time_unit、end_not_after_start、duration、past、advance、opening_hours、capacity；409 類：occupied、quota、suspended、venue_inactive
+          enum:
+            - time_unit
+            - duration
+            - end_not_after_start
+            - past
+            - advance
+            - opening_hours
+            - capacity
+            - occupied
+            - quota
+            - suspended
+            - venue_inactive
+        message:
+          type: string
+          description: 繁體中文，說明未通過的原因與可以怎麼做；暫停類訊息含以台北時間書寫的解除時間
+    Suggestions:
+      type: object
+      description: 替代建議（沿用 003）。只在 violations 恰好只有 occupied 一項時出現；建議只是暫時產生的唯讀結果，不被保存，也不保留任何時段
+      required: [slots, noSlotsToday, venues]
+      properties:
+        slots:
+          $ref: "#/components/schemas/SlotSuggestions"
+        noSlotsToday:
+          type: boolean
+          description: slots 的 before 與 after 都是 null 時為 true；不跨日尋找
+        venues:
+          type: array
+          description: 同時段其他可用場地，已排好序（不需審核者在前、需審核者在後，各自依場地名稱排序），最多 5 個，沒有時為空陣列
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/VenueSuggestion"
+    SlotSuggestions:
+      type: object
+      description: 同場地空檔建議；同一台北日期、長度與所選相同
+      required: [before, after]
+      properties:
+        before:
+          oneOf:
+            - $ref: "#/components/schemas/SlotSuggestion"
+            - type: "null"
+          description: 開始時間早於所選、離所選開始時間最近的空檔；沒有時為 null
+        after:
+          oneOf:
+            - $ref: "#/components/schemas/SlotSuggestion"
+            - type: "null"
+          description: 開始時間晚於所選、離所選開始時間最近的空檔；沒有時為 null
+    SlotSuggestion:
+      type: object
+      description: 一個空檔建議；已通過一般單次預約的全部規則檢查（顯示當下）
+      required: [startAt, endAt]
+      properties:
+        startAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 空檔開始時間（UTC，帶 Z）；前端換算為台北日期與時分後顯示並填回表單
+        endAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 空檔結束時間（UTC，帶 Z）；當天結束的 24:00 對應台北隔日 00:00
+    VenueSuggestion:
+      type: object
+      description: 一個其他可用場地建議；只含場地公開欄位，不含任何占用者資訊
+      required: [venueId, name, capacity, requiresApproval]
+      properties:
+        venueId:
+          type: integer
+        name:
+          type: string
+          description: 場地名稱
+        capacity:
+          type: integer
+          description: 場地容納人數，不小於預約人數
+        requiresApproval:
+          type: boolean
+          description: 場地是否需審核；true 時前端標示「需審核」，送出後預約為 pending
+    TimeOfDay:
+      type: string
+      pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+      description: 台北當地時間 HH:mm
+    EndTimeOfDay:
+      type: string
+      pattern: "^(([01][0-9]|2[0-3]):[0-5][0-9]|24:00)$"
+      description: 台北當地時間 HH:mm，24:00 表示當日結束
+    BookingStatus:
+      type: string
+      enum:
+        [
+          pending,
+          confirmed,
+          checked_in,
+          completed,
+          rejected,
+          cancelled,
+          no_show,
+        ]
+      description: 待審核、已確認、已報到、已完成、已駁回、已取消、未到場
+    FavoriteState:
+      type: object
+      description: 加入或取消收藏後，本人對該場地目前的收藏狀態；只屬於目前登入者本人
+      required: [venueId, isFavorite]
+      properties:
+        venueId:
+          type: integer
+        isFavorite:
+          type: boolean
+          description: 加入收藏成功為 true，取消收藏成功為 false
+    BookingDefaults:
+      type: object
+      description: 本人記住的預約預設值，取自最近一次成功建立的單次預約（含再預約一次），每位員工只有一份；週期性預約、候補遞補、修改與取消都不會改變它
+      required: [attendees, durationMinutes]
+      properties:
+        attendees:
+          type: integer
+          minimum: 1
+          description: 最近一次成功建立的單次預約的人數
+        durationMinutes:
+          type: integer
+          minimum: 30
+          multipleOf: 30
+          description: 最近一次成功建立的單次預約的時長，為結束時間減開始時間的分鐘數；前端以台北當地時分加上它推導結束時間
+    Context:
+      type: object
+      required: [now, today, maxBookableDate, rules]
+      properties:
+        now:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 伺服器目前時間（UTC）
+        today:
+          type: string
+          format: date
+          description: 目前台北日期
+        maxBookableDate:
+          type: string
+          format: date
+          description: 今天起算最遠可預約日期（含）
+        rules:
+          $ref: "#/components/schemas/RuleValues"
+        bookingDefaults:
+          oneOf:
+            - $ref: "#/components/schemas/BookingDefaults"
+            - type: "null"
+          description: 本人記住的人數與時長；從未成功建立單次預約為 null；讀取失敗時整個欄位省略（與 null 不同），前端視同從未預約並顯示載入失敗提示
+    RuleValues:
+      type: object
+      description: 規則目前值，一律以儲存單位表示（時間類為分鐘）
+      required:
+        [
+          maxDurationMinutes,
+          maxAdvanceDays,
+          maxActiveBookings,
+          maxActiveSeries,
+          maxSeriesMonths,
+          lateCancelMinutes,
+          waitlistConfirmMinutes,
+          waitlistCutoffMinutes,
+          checkinOpenMinutes,
+          checkinCloseMinutes,
+        ]
+      properties:
+        maxDurationMinutes:
+          type: integer
+          description: 單次時長上限（分鐘）；前端用來判斷記住的時長是否超過現行上限
+        maxAdvanceDays:
+          type: integer
+        maxActiveBookings:
+          type: integer
+        maxActiveSeries:
+          type: integer
+        maxSeriesMonths:
+          type: integer
+        lateCancelMinutes:
+          type: integer
+        waitlistConfirmMinutes:
+          type: integer
+        waitlistCutoffMinutes:
+          type: integer
+        checkinOpenMinutes:
+          type: integer
+        checkinCloseMinutes:
+          type: integer
+    OpeningHour:
+      type: object
+      required: [weekday, startTime, endTime]
+      properties:
+        weekday:
+          type: integer
+          minimum: 0
+          maximum: 6
+          description: 0 為週日
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+    Venue:
+      type: object
+      required:
+        [
+          id,
+          name,
+          location,
+          capacity,
+          equipment,
+          requiresApproval,
+          openingHours,
+        ]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        location:
+          type: string
+        capacity:
+          type: integer
+        equipment:
+          type: array
+          items:
+            type: string
+        requiresApproval:
+          type: boolean
+        openingHours:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpeningHour"
+        isFavorite:
+          type: boolean
+          description: 目前登入者本人是否已收藏此場地，只依本人的收藏計算；只有搜尋場地（searchVenues）的回應會帶，管理端場地列表不帶。讀取收藏失敗時所有場地都省略此欄位（不是 false）
+    VenueList:
+      type: object
+      required: [items, equipmentOptions]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Venue"
+        equipmentOptions:
+          type: array
+          description: 啟用中場地出現過的設備名稱，去重後排序
+          items:
+            type: string
+    Calendar:
+      type: object
+      required: [venue, today, view, from, to, days]
+      properties:
+        venue:
+          type: object
+          required: [id, name, location]
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            location:
+              type: string
+            isFavorite:
+              type: boolean
+              description: 目前登入者本人是否已收藏此場地；讀取收藏失敗時省略
+        today:
+          type: string
+          format: date
+          description: 目前台北日期
+        view:
+          type: string
+          enum: [day, week]
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
+        days:
+          type: array
+          items:
+            $ref: "#/components/schemas/CalendarDay"
+    CalendarDay:
+      type: object
+      required: [date, weekday, openRanges, slots]
+      properties:
+        date:
+          type: string
+          format: date
+        weekday:
+          type: integer
+          minimum: 0
+          maximum: 6
+        openRanges:
+          type: array
+          description: 該日的開放區間（不扣除已過去與超過最遠可預約日的部分）；空陣列表示整天不開放
+          items:
+            type: object
+            required: [startTime, endTime]
+            properties:
+              startTime:
+                $ref: "#/components/schemas/TimeOfDay"
+              endTime:
+                $ref: "#/components/schemas/EndTimeOfDay"
+        slots:
+          type: array
+          description: 48 個 30 分鐘時段，由 00:00 起
+          items:
+            $ref: "#/components/schemas/CalendarSlot"
+    CalendarSlot:
+      type: object
+      required: [startTime, endTime, status]
+      properties:
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        status:
+          type: string
+          enum: [available, booked, maintenance, closed]
+          description: 可預約、已預約（含候補保留）、維護中、不開放（含已過去與超過最遠可預約日）
+    BookingInput:
+      type: object
+      description: 建立單次預約的請求；date、startTime、endTime 為台北當地日期與時分，不接受帶時區或偏移量的時間戳。預填的人數與依時長帶出的結束時間只是前端先填入欄位，送出格式與手動輸入完全相同；請求不含員工編號，預約一律屬於目前登入者
+      required: [venueId, date, startTime, endTime, subject, attendees]
+      properties:
+        venueId:
+          type: integer
+        date:
+          type: string
+          format: date
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        subject:
+          type: string
+          maxLength: 100
+        attendees:
+          type: integer
+          minimum: 1
+    Booking:
+      type: object
+      required:
+        [
+          id,
+          venueId,
+          venueName,
+          date,
+          startTime,
+          endTime,
+          startAt,
+          endAt,
+          subject,
+          attendees,
+          status,
+          lateCancel,
+        ]
+      properties:
+        id:
+          type: integer
+        venueId:
+          type: integer
+        venueName:
+          type: string
+        date:
+          type: string
+          format: date
+          description: 台北當地日期
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        startAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 開始時間（UTC，帶 Z）
+        endAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 結束時間（UTC，帶 Z）
+        subject:
+          type: string
+        attendees:
+          type: integer
+        status:
+          $ref: "#/components/schemas/BookingStatus"
+        lateCancel:
+          type: boolean

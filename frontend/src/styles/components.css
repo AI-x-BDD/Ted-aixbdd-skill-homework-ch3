@@ -1107,3 +1107,24 @@ h1 + .lead {
   margin: 0;
   font-size: 0.85rem;
 }
+
+/* 收藏場地（004，UI-01）：收藏標記、按鈕與停用標籤；360 像素寬度不水平捲動 */
+.favorite-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.favorite-toggle {
+  min-height: 44px;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.favorite-toggle[aria-busy="true"] {
+  cursor: progress;
+}
+.favorite-mark-text {
+  white-space: nowrap;
+}

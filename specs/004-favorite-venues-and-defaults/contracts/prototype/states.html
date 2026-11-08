@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>狀態入口</title>
+    <link rel="stylesheet" href="proto.css" />
+    <style>
+      main.entry {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 40px 16px 72px;
+      }
+      main.entry h2 {
+        margin: 28px 0 8px;
+        font-size: 15px;
+        color: var(--muted);
+      }
+      main.entry ul {
+        list-style: none;
+        margin: 0 0 8px;
+        padding: 6px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+      }
+      main.entry li + li {
+        border-top: 1px solid var(--line);
+      }
+      main.entry li a {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 44px;
+        padding: 8px 12px;
+        color: var(--text);
+        text-decoration: none;
+        font-weight: 600;
+        flex-wrap: wrap;
+      }
+      main.entry li a:hover {
+        background: var(--bg);
+        border-radius: 10px;
+      }
+      main.entry li a::before {
+        content: "";
+        flex: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--ok);
+      }
+      main.entry li a[href*="state=loading"]::before {
+        background: var(--accent);
+      }
+      main.entry li a[href*="state=empty"]::before {
+        background: var(--warn);
+      }
+      main.entry li a[href*="state=error"]::before {
+        background: var(--danger);
+      }
+      code {
+        margin-left: auto;
+        padding: 2px 8px;
+        border-radius: 8px;
+        background: var(--surface-2);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 500;
+        word-break: break-all;
+      }
+      .note {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.7;
+        margin: 0 0 6px;
+        padding-left: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="entry">
+      <h1>狀態入口</h1>
+      <p class="lead">
+        「我的收藏場地與常用預設值」的 HTML 原型。UI-01 在場地頁（<code>venues.html</code>）；UI-02 與 UI-03 共用預約表單頁（<code>booking-form.html</code>）。
+        收藏與預設值是示範用，會存在這個瀏覽器的 localStorage，讓場地頁與預約表單看到同一份收藏；每個連結都會明確指定起始資料，下方的「還原」可清除。「我的預約」等 001、002 的其他頁面不在本原型範圍。
+      </p>
+
+      <h2>UI-01 場地收藏操作（場地頁）</h2>
+      <p class="note">起始收藏：大會議室、小型討論室 A（另有已停用的多功能活動室，收藏保留但不顯示）。</p>
+      <ul>
+        <li>
+          <a href="venues.html?favs=default"
+            >成功：查詢結果，已收藏的場地帶「已收藏」標記<code>venues.html</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?favs=none"
+            >成功：尚未收藏任何場地（所有場地都是「加入收藏」）<code>?favs=none</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?id=v1&amp;favs=default"
+            >成功：行事曆頁頭的收藏按鈕<code>?id=v1</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?state=loading"
+            >載入：骨架佔位，收藏按鈕不顯示<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?state=empty"
+            >空狀態：沒有符合條件的場地<code>?state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?state=error&amp;kind=toggle&amp;favs=default"
+            >錯誤：加入或取消收藏失敗，狀態不變<code>?state=error&amp;kind=toggle</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?state=error&amp;kind=disabled&amp;favs=none"
+            >錯誤：按「加入收藏」時場地已被停用<code>?state=error&amp;kind=disabled</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?state=error&amp;kind=load"
+            >錯誤：場地列表載入失敗（沿用 001）<code>?state=error&amp;kind=load</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?id=v1&amp;state=empty"
+            >空狀態：行事曆當日不開放<code>?id=v1&amp;state=empty</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-02 預約表單場地選單</h2>
+      <ul>
+        <li>
+          <a href="booking-form.html?favs=default&amp;defaults=default"
+            >成功：先「我的收藏」再「其他場地」，場地停在「請選擇場地」<code>booking-form.html</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?favs=none&amp;defaults=default"
+            >沒有收藏：不分組、不顯示空的「我的收藏」區<code>?favs=none</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?favs=many&amp;defaults=default"
+            >收藏很多場地（含已停用者不顯示）<code>?favs=many</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?mode=edit&amp;favs=default&amp;defaults=default"
+            >修改預約：場地欄位維持原場地，選單仍分組<code>?mode=edit</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?recurring=1&amp;favs=default&amp;defaults=default"
+            >週期性預約：選單分組相同<code>?recurring=1</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?mode=rebook&amp;favs=default&amp;defaults=default"
+            >再預約一次：場地固定唯讀，不使用選單<code>?mode=rebook</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?state=loading"
+            >載入：骨架佔位<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?state=empty&amp;favs=default&amp;defaults=default"
+            >空狀態：沒有任何啟用場地（沿用 001）<code>?state=empty</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?state=error&amp;kind=favorites&amp;favs=default&amp;defaults=default"
+            >錯誤：收藏載入失敗，選單退回不分組<code>?state=error&amp;kind=favorites</code></a
+          >
+        </li>
+        <li>
+          <a href="venues.html?id=v3&amp;favs=default"
+            >登記候補對話框：到行事曆的「已預約」時段按「登記候補」，場地選單同樣分組<code>venues.html?id=v3</code></a
+          >
+        </li>
+      </ul>
+
+      <h2>UI-03 預約表單預填</h2>
+      <p class="note">起始預設值：6 人、1 小時 30 分鐘。選好開始時間（例如 10:00）觀察結束時間自動帶出 11:30。</p>
+      <ul>
+        <li>
+          <a href="booking-form.html?favs=default&amp;defaults=default"
+            >成功：人數預填 6，選開始時間後結束時間自動帶出<code>booking-form.html</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?favs=default&amp;defaults=none"
+            >空狀態：從未成功預約，人數與結束時間空白待選<code>?defaults=none</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?favs=default&amp;defaults=default&amp;venue=v1&amp;date=2026-11-09"
+            >套不上：已選場地與日期，開始時間選 17:30 時帶出的結束時間超出開放時段，不自動帶出<code>?venue=v1&amp;date=2026-11-09</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?favs=default&amp;defaults=default&amp;dur=360"
+            >套不上：記住的時長 6 小時超過單次上限，開啟時就說明，人數仍預填<code>?dur=360</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?favs=default&amp;defaults=default&amp;venue=v1&amp;date=2026-11-09&amp;start=10:00&amp;end=11:00"
+            >網址已帶入起訖（行事曆「預約此時段」）：以帶入的值為準，不套用時長<code>&amp;start=10:00&amp;end=11:00</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?favs=default&amp;defaults=default&amp;recurring=1"
+            >週期性預約：不使用記住的人數與時長；取消勾選會重新預填<code>?recurring=1</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?mode=edit&amp;favs=default&amp;defaults=default"
+            >修改預約：維持原預約的人數與起訖，不預填<code>?mode=edit</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?mode=rebook&amp;favs=default&amp;defaults=default"
+            >再預約一次：人數以來源預約的 8 人為準，不使用記住的 6<code>?mode=rebook</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?state=loading"
+            >載入：人數與結束時間位置顯示骨架<code>?state=loading</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?state=error&amp;kind=defaults&amp;favs=default&amp;defaults=default"
+            >錯誤：預設值載入失敗，視同從未預約，表單照常可填<code>?state=error&amp;kind=defaults</code></a
+          >
+        </li>
+        <li>
+          <a href="booking-form.html?state=error&amp;favs=default&amp;defaults=default"
+            >錯誤：收藏與預設值都載入失敗<code>?state=error</code></a
+          >
+        </li>
+      </ul>
+      <p class="note">
+        想看預設值被更新：在成功狀態填好場地、日期（例如 2026-11-09）、主題後送出，成立後再開一次表單，人數與時長會變成剛剛送出的值；送出被拒絕（例如人數超過容納人數）、修改預約與週期性預約都不會改變預設值。
+      </p>
+
+      <button class="btn" id="reset" type="button">清除操作紀錄，還原假資料</button>
+    </main>
+    <script src="proto.js"></script>
+    <script src="favorites.js"></script>
+    <script>
+      document.getElementById("reset").onclick = function () {
+        P.proto004.reset();
+        document.getElementById("reset").textContent = "已還原";
+      };
+    </script>
+  </body>
+</html>

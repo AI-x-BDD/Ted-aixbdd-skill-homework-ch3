@@ -1,6 +1,6 @@
 import { fromTaipei, toTaipeiParts } from "../../../shared/src/taipei.js";
 
-function timeToMinute(time) {
+export function timeToMinute(time) {
   if (time === "24:00") {
     return 1440;
   }

@@ -4,10 +4,11 @@ import {
   toTaipeiParts,
 } from "../../../shared/src/taipei.js";
 import { now } from "../clock.js";
-import { validateBooking } from "../domain/bookingRules.js";
+import { timeToMinute, validateBooking } from "../domain/bookingRules.js";
 import { can } from "../domain/policy.js";
 import { withTransaction } from "../db/pool.js";
 import { HttpError } from "../lib/http.js";
+import * as bookingDefaultsRepository from "../repositories/bookingDefaultsRepository.js";
 import * as bookingRepository from "../repositories/bookingRepository.js";
 import * as eventRepository from "../repositories/eventRepository.js";
 import * as ruleRepository from "../repositories/ruleRepository.js";
@@ -163,6 +164,17 @@ function toBooking(row) {
   };
 }
 
+// 預設值寫入在獨立的連線與交易中執行；失敗只記錄，不影響已成立的預約（data-model.dbml 交易邊界）
+async function saveBookingDefaults(userId, values) {
+  try {
+    await withTransaction((conn) =>
+      bookingDefaultsRepository.upsert(conn, { userId, ...values }),
+    );
+  } catch (error) {
+    console.error("寫入預約預設值失敗，預約仍已成立", error);
+  }
+}
+
 export async function createBooking(user, input) {
   requireCreate(user);
   const current = now();
@@ -182,7 +194,7 @@ export async function createBooking(user, input) {
     throw new HttpError(400, "請修正標示的欄位後再送出。", { fields });
   }
   try {
-    return await withTransaction(async (conn) => {
+    const booking = await withTransaction(async (conn) => {
       const rules = await ruleRepository.loadAll(conn);
       const venue = await venueRepository.findForBooking(conn, input.venueId);
       if (!venue) {
@@ -321,6 +333,14 @@ export async function createBooking(user, input) {
       }
       return toBooking(created);
     });
+    // 預約成立後才更新本人的預設值（004 FR-008）；寫入失敗不影響已成立的預約
+    await saveBookingDefaults(user.id, {
+      attendees,
+      durationMinutes:
+        timeToMinute(input.endTime) - timeToMinute(input.startTime),
+      updatedAt: current,
+    });
+    return booking;
   } catch (error) {
     if (error instanceof OccupiedError || error.occupied) {
       const suggestions = await loadLatestSuggestions(input, attendees);

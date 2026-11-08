@@ -1,0 +1,106 @@
+Project venue_booking {
+  Note: '''
+    # 資料模型：我的收藏場地與常用預設值
+
+    **功能分支**：`004-favorite-venues-and-defaults`
+
+    資料庫為 MySQL 8.4 LTS（InnoDB、utf8mb4），沿用 001-venue-booking 的連線與命名慣例：所有表示時間點的欄位為 `DATETIME(3)`，存 UTC，欄位名一律以 `_at` 結尾，欄位 note 標明 UTC（C-SH-02）；連線設定 `time_zone = '+00:00'`，程式與 SQL 不使用 `NOW()`，目前時間一律以參數帶入。主鍵除特別註明外為 `BIGINT`。
+
+    本功能只新增兩張資料表 `favorite_venues`、`booking_defaults`（遷移檔 `backend/src/db/migrations/008_favorites_defaults.sql`）。`users`、`venues` 是兩張新表外鍵的父表，依 DBML 不支援跨檔引用的限制，自 `specs/001-venue-booking/data-model.dbml` 完整重寫於本檔，內容與 001 相同，**不是**本功能新增或修改的資料表，遷移不得重複建立或更動它們。001 之後的 002、003 沒有 `data-model.dbml`，兩者新增的資料表與本功能無關，不在本檔出現。
+
+    本功能不新增任何預約或批次狀態欄位，也不修改 `bookings.status`、`booking_series.status` 的 CHECK 清單，因此不涉及 C-SH-01 的狀態代碼；本檔不重複定義 `bookings`、`booking_series`。
+
+    ## 交易邊界
+
+    所有交易使用預設的 REPEATABLE READ；遇死結（ER_LOCK_DEADLOCK）或鎖逾時，沿用 001 的重試規則。本功能沒有檔案系統寫入，不需處理檔案與交易的先後。
+
+    | 交易 | 範圍 | 失敗處理 |
+    |---|---|---|
+    | 加入收藏（addFavoriteVenue） | 先唯讀讀取 venues（id、is_active）：不存在回 404、已停用回 409，皆不寫入；其餘以單一語句 `INSERT IGNORE INTO favorite_venues (user_id, venue_id, created_at)` 寫入，主鍵 (user_id, venue_id) 重複時略過，重複點擊或兩個請求併發的最終結果都是一筆已收藏 | 單一語句，失敗無殘留，收藏狀態不變，回 500；檢查後場地才被停用的競態無害（收藏列保留，停用場地不顯示，重新啟用後自動恢復） |
+    | 取消收藏（removeFavoriteVenue） | 單一語句 `DELETE FROM favorite_venues WHERE user_id = ? AND venue_id = ?`，不檢查場地是否啟用；影響 0 列也視為成功 | 單一語句，失敗無殘留，收藏狀態不變，回 500 |
+    | 建立單次預約後更新預設值（createBooking 的預設值寫入） | 預約交易（001 的「建立單次預約」）提交後，另以獨立連線、獨立交易執行單一語句 `INSERT INTO booking_defaults (user_id, attendees, duration_minutes, updated_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE attendees = VALUES(attendees), duration_minutes = VALUES(duration_minutes), updated_at = VALUES(updated_at)`，以 user_id 為唯一鍵取代，不先讀後寫 | 預約交易不包含此寫入；寫入失敗只記錄錯誤，預約仍成立、回 201，單一語句不留下部分更新的預設值；兩個裝置幾乎同時成功建立預約時，後執行的語句覆蓋先執行者（最後寫入者勝出） |
+    | 讀取收藏與預設值（searchVenues、getVenueCalendar、getContext） | 不開交易，單一 SELECT；讀取失敗時由後端省略 isFavorite、bookingDefaults，其餘資料照常回傳 | 無寫入，不需回滾 |
+
+    其餘既有交易（登入、建立預約、取消預約、停用場地、停用帳號等）不寫入這兩張表，鎖定順序沿用 001；本功能的兩張表只在上述單一語句中被寫入，不與其他表同交易，因此不新增鎖定順序，也不會造成新的死結路徑。
+
+    ## 資料庫層檢查約束（遷移以 CHECK 實作，MySQL 8.4 會強制執行）
+
+    - booking_defaults：attendees >= 1；duration_minutes >= 30 且 duration_minutes % 30 = 0。`duration_minutes` 為分鐘數，不是時間點，不受 C-SH-02 的 `_at` 命名規則約束。人數是否超過某場地容納人數不在此檢查，那是預約當下依所選場地由服務層檢查。
+    - favorite_venues：沒有 CHECK；唯一性與完整性由主鍵與外鍵保證。
+
+    ## 場地與帳號停用後的資料保留
+
+    停用場地、停用帳號都只更新 `venues.is_active`、`users.is_active`，不刪除任何列，且 001 的外鍵政策為全部 restrict、本系統不物理刪除 users 與 venues。兩張新表的外鍵一律 `delete: restrict`，不使用連鎖刪除：場地停用期間收藏列照舊保留（讀取端以啟用中的場地過濾，不顯示），重新啟用後自動恢復（FR-006）；帳號停用後重新啟用，收藏與預設值維持原樣。
+
+    ## 遷移對既有資料的影響
+
+    `008_favorites_defaults.sql` 只建立 `favorite_venues`、`booking_defaults` 兩張新表，不修改、不改名、不刪除 001 至 007 的任何資料表、欄位、索引或資料列，也不回填資料：既有員工一開始沒有收藏、沒有預設值（`GET /api/context` 的 bookingDefaults 為 null），不從歷史預約推導，所以在已有資料的資料庫上執行不影響既有資料，也不需要停機或鎖表。兩張新表的外鍵父表 users、venues 為既有表，遷移順序在 001 至 007 之後。回復方式為依相反順序 DROP 兩張新表，不影響其他表。
+  '''
+}
+
+Table users {
+  id bigint [pk, increment, note: '帳號識別']
+  email varchar(254) [not null, note: '登入 Email；寫入與比對前一律去除首尾空白並轉小寫；欄位定序使用 utf8mb4_bin，使不同大小寫或重音符號不被視為同一個信箱']
+  name varchar(100) [not null, note: '姓名']
+  password_hash varchar(255) [not null, note: 'scrypt 雜湊字串（參數、鹽、雜湊），沒有可還原的密碼；任何查詢結果都不回傳此欄']
+  is_active tinyint [not null, default: 1, note: '1 啟用，0 已停用；停用後不得登入']
+  must_change_password tinyint [not null, default: 0, note: '1 表示管理員重設密碼後須先自行改密碼；為 1 時除查詢自己、變更密碼、登出外一律拒絕']
+  suspended_until_at datetime(3) [null, default: null, note: '預約權限暫停到此時間（UTC）；NULL 或不大於目前時間表示未暫停；期滿不需排程，以目前時間比較']
+  no_show_counted_from_at datetime(3) [null, default: null, note: 'UTC；未到場累計的起算下限；達門檻暫停時設為 suspended_until_at，使暫停期間發生的未到場不延長暫停；NULL 表示不設下限']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；建立時間']
+
+  indexes {
+    email [unique, name: 'uk_users_email', note: '供登入查詢與 Email 全系統唯一（FR-001）']
+  }
+
+  Note: '''
+    保存帳號、停用狀態、密碼雜湊、須改密碼旗標、預約權限暫停與未到場累計起點。
+    沿用 001 的資料表，供 favorite_venues、booking_defaults 的外鍵參照；本功能不修改此表。
+  '''
+}
+
+Table venues {
+  id bigint [pk, increment, note: '場地識別']
+  name varchar(100) [not null, note: '場地名稱，全系統唯一']
+  location varchar(200) [not null, note: '地點']
+  capacity int [not null, note: '容納人數，正整數（CHECK >= 1）']
+  equipment json [not null, default: `(JSON_ARRAY())`, note: '設備名稱字串陣列；搜尋時以 JSON_CONTAINS 判斷是否具備所有指定設備，equipmentOptions 由啟用場地的陣列合併取得']
+  requires_approval tinyint [not null, default: 0, note: '1 表示預約需審核']
+  is_active tinyint [not null, default: 1, note: '1 啟用，0 停用；停用場地不出現在搜尋與行事曆、不接受新預約、不接受新增收藏；既有收藏列保留']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；建立時間']
+
+  indexes {
+    name [unique, name: 'uk_venues_name', note: '供場地名稱唯一（FR-006）']
+  }
+
+  Note: '''
+    保存場地基本資料、是否需審核與啟用狀態；規模在 20 個以內，搜尋時全表掃描即可，故不另建其他索引。
+    沿用 001 的資料表，供 favorite_venues 的外鍵參照與加入收藏時檢查 is_active；本功能不修改此表。
+  '''
+}
+
+Table favorite_venues {
+  user_id bigint [not null, note: '收藏者；對應 x-inner-needs favorite_venues.user_id，只由階段憑證所對應的目前使用者決定，請求不接受員工編號（NFR-002）']
+  venue_id bigint [not null, note: '被收藏的場地；對應 x-inner-needs favorite_venues.venue_id；場地停用後本列保留，不顯示也不刪除（FR-006）']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；加入收藏的時間；對應 addFavoriteVenue 寫入的 created_at；重複加入（INSERT IGNORE）不更新此值']
+
+  indexes {
+    (user_id, venue_id) [pk, name: 'pk_favorite_venues', note: '同一員工對同一場地最多一筆（FR-002），併發重複加入由主鍵擋下；其最左前綴 user_id 也供搜尋場地、行事曆、預約表單依本人載入全部收藏，以及取消收藏依 (user_id, venue_id) 刪除']
+    venue_id [name: 'ix_favorite_venues_venue', note: '供外鍵 fk_favorite_venues_venue_id 檢查與維護（InnoDB 外鍵必須有以 venue_id 開頭的索引，不另建會被隱式建立）；目前沒有依場地反查全部收藏者的 API，不得為此再增加其他索引']
+  }
+
+  Note: '保存每位員工收藏的場地，一列代表一個員工對一個場地的收藏；只屬於本人，不提供他人的收藏；取消收藏物理刪除該列，場地或帳號停用則不刪除。'
+}
+
+Table booking_defaults {
+  user_id bigint [pk, note: '預設值所屬的員工；對應 x-inner-needs booking_defaults.user_id；每位員工只有一份（FR-008），只依階段憑證的目前使用者讀寫（NFR-002）']
+  attendees int [not null, note: '最近一次成功建立的單次預約的人數（CHECK >= 1）；對應 x-inner-needs booking_defaults.attendees；GET /api/context 的 bookingDefaults.attendees']
+  duration_minutes int [not null, note: '單位為分鐘，最近一次成功建立的單次預約的時長（結束時間減開始時間，24:00 以 1440 計），不是時間點；須為 30 的倍數且 >= 30（CHECK）；對應 x-inner-needs booking_defaults.duration_minutes；GET /api/context 的 bookingDefaults.durationMinutes。不隨規則調降、場地、或後來的取消與修改而改變']
+  updated_at datetime(3) [not null, note: 'UTC；最近一次寫入預設值的時間；由後端以參數帶入（不使用 NOW()）；對應 createBooking 寫入的 updated_at']
+
+  Note: '保存每位員工的預約預設值（人數與時長），只有成功建立單次預約（含再預約一次）時以取代式更新寫入；修改、取消、被拒絕、週期性預約與候補遞補都不寫入；從未預約的員工沒有列，讀取端回傳 null。主鍵 user_id 本身即供讀取與取代式更新使用，不另建索引。'
+}
+
+Ref fk_favorite_venues_user_id: favorite_venues.user_id > users.id [delete: restrict]
+Ref fk_favorite_venues_venue_id: favorite_venues.venue_id > venues.id [delete: restrict]
+Ref fk_booking_defaults_user_id: booking_defaults.user_id > users.id [delete: restrict]
