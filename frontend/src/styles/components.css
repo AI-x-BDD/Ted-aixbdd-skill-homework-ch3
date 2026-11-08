@@ -1128,3 +1128,192 @@ h1 + .lead {
 .favorite-mark-text {
   white-space: nowrap;
 }
+
+/* 005 參與者邀請：預約表單邀請欄位（360 像素不水平捲動，長 Email 自動換行） */
+.invitee-field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.invitee-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+.invitee-row input {
+  flex: 1 1 180px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 44px;
+}
+.invitee-row .btn {
+  min-height: 44px;
+}
+.invitee-hint,
+.invitee-count {
+  color: var(--muted);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+.invitee-error {
+  color: var(--danger);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+.invitee-problems {
+  border: 1px solid var(--danger);
+  background: var(--danger-soft);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+.invitee-problems ul {
+  margin: 6px 0 0;
+  padding-left: 1.2em;
+}
+.invitee-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.85rem;
+}
+
+/* 005 我的邀請：列表、卡片、回覆標籤與回覆按鈕（360 像素不水平捲動，可點目標至少 44 像素高） */
+.invitation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.invitation-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.invitation-card .title {
+  font-weight: 600;
+}
+.invitation-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.reply-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.85rem;
+}
+.reply-tag--invalid {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.reply-tag--warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.reply-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.reply-buttons .btn {
+  min-height: 44px;
+}
+.reply-buttons .btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.invitation-note {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* 005 受邀者面板：統計列、並列區、名單（360 像素不水平捲動，姓名與 Email 自動換行） */
+.invitee-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.invitee-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.invitee-stats li {
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 0.9rem;
+}
+.invitee-compare {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.invitee-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.invitee-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.invitee-list .invitee-name-text {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.invitee-panel .btn {
+  min-height: 44px;
+}
+/* 005 受邀者面板：新增欄位與移除（360 像素不水平捲動，可點目標至少 44 像素高） */
+.invitee-add {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.invitee-add textarea {
+  width: 100%;
+  min-height: 44px;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+}
+.invitee-add-problems {
+  border: 1px solid var(--danger);
+  background: var(--danger-soft);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+.invitee-add-problems ul {
+  margin: 6px 0 0;
+  padding-left: 1.2em;
+}

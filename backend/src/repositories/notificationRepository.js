@@ -1,13 +1,14 @@
 export async function insert(conn, notification) {
   const [result] = await conn.query(
-    `INSERT INTO notifications (user_id, type, message, booking_id, waitlist_entry_id, created_at)
-     VALUES (:userId, :type, :message, :bookingId, :waitlistEntryId, :createdAt)`,
+    `INSERT INTO notifications (user_id, type, message, booking_id, waitlist_entry_id, invitation_id, created_at)
+     VALUES (:userId, :type, :message, :bookingId, :waitlistEntryId, :invitationId, :createdAt)`,
     {
       userId: notification.user_id,
       type: notification.type,
       message: notification.message,
       bookingId: notification.booking_id ?? null,
       waitlistEntryId: notification.waitlist_entry_id ?? null,
+      invitationId: notification.invitation_id ?? null,
       createdAt: notification.created_at,
     },
   );

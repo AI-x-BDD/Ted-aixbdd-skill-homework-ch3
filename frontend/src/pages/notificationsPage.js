@@ -3,6 +3,7 @@ import { mountPage } from "../components/nav.js";
 import { showToast } from "../components/toast.js";
 import { h } from "../lib/h.js";
 import { formatTaipei } from "../../../shared/src/taipei.js";
+import { INVITATION_TEXT, INVITEE_TEXT } from "../../../shared/src/copy.js";
 
 const TYPE_LABELS = {
   booking_created: "預約成立",
@@ -14,6 +15,8 @@ const TYPE_LABELS = {
   suspension: "權限暫停",
   waitlist_expired: "候補失效",
   reminder: "開始前提醒",
+  // 005 參與者邀請的五種類型標籤（ui-contract.md › UI-04）
+  ...INVITEE_TEXT.notificationTypeLabels,
 };
 
 export async function render(container) {
@@ -106,6 +109,14 @@ export async function render(container) {
         ),
         h("p", { text: item.message }),
         h("div", { class: "meta", text: when }),
+        item.invitationId
+          ? h("a", {
+              class: "btn sm",
+              href: `#/invitations/${item.invitationId}`,
+              testid: "notification-open-invitation",
+              text: INVITATION_TEXT.openLink,
+            })
+          : null,
       );
       row.append(
         h("button", {
@@ -127,7 +138,9 @@ export async function render(container) {
                   badge.hidden = next === 0;
                 }
               }
-              if (item.bookingId) location.hash = "#/bookings";
+              // 邀請通知只標為已讀，由「查看邀請」連結進入詳情（UI-04）
+              if (item.invitationId) draw(hasMore);
+              else if (item.bookingId) location.hash = "#/bookings";
               else if (item.waitlistEntryId) location.hash = "#/waitlist";
               else draw(hasMore);
             } catch {

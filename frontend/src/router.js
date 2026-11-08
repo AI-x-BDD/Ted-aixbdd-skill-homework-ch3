@@ -12,6 +12,7 @@ const PAGE_LOADERS = {
   "/bookings": () => import("./pages/myBookingsPage.js"),
   "/waitlist": () => import("./pages/waitlistPage.js"),
   "/notifications": () => import("./pages/notificationsPage.js"),
+  "/invitations": () => import("./pages/invitationsPage.js"),
   "/reviews": () => import("./pages/reviewsPage.js"),
   "/admin/venues": () => import("./pages/adminVenuesPage.js"),
   "/admin/users": () => import("./pages/adminUsersPage.js"),
@@ -36,6 +37,13 @@ function parseHash() {
     return {
       route: "/bookings/new",
       params: { bookingId: editMatch[1], ...query },
+    };
+  }
+  const invitationMatch = path.match(/^\/invitations\/([^/]+)$/);
+  if (invitationMatch) {
+    return {
+      route: "/invitations",
+      params: { invitationId: invitationMatch[1], ...query },
     };
   }
   return { route: path, params: query };

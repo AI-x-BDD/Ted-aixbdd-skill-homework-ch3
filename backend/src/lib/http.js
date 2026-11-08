@@ -26,6 +26,8 @@ export function sendError(res, status, message, extra = {}) {
   if (extra.conflicts) body.conflicts = extra.conflicts;
   if (extra.impact) body.impact = extra.impact;
   if (extra.suggestions) body.suggestions = extra.suggestions;
+  if (extra.reason) body.reason = extra.reason;
+  if (extra.inviteeProblems) body.inviteeProblems = extra.inviteeProblems;
   sendJson(res, status, body);
 }
 

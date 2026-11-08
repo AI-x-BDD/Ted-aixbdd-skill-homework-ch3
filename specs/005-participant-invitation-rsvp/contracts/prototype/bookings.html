@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>我的預約</title>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script src="invite-data.js"></script>
+    <script>
+      /* UI-03 預約詳情受邀者面板：掛在我的預約每筆單次預約卡片上。
+         ?open=b1（已確認）|b2（待審核）|b4（沒有受邀者）|b5（已開始）|b6（已取消）；
+         ?state=loading|empty|error 讓面板停在對應狀態（error 可加 &kind=forbidden）；
+         ?addtext=… 預填新增欄位；?fail=started|cancelled|network 讓新增與移除被拒絕；?tab=past */
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("bookings.html");
+        var u = function (n, e, inv, reply) {
+          return { id: "iv-" + e.split("@")[0], name: n, email: e, inv: inv, reply: reply };
+        };
+        var data = [
+          { id: "b1", venue: "201 會議室", cap: 8, date: "2026-11-09", s: "10:00", e: "11:00", subject: "週會", n: 6, status: "confirmed", approval: false,
+            invitees: [u("張雅婷", "yating@example.com", "valid", "accepted"), u("李大華", "dahua@example.com", "valid", "accepted"), u("吳建宏", "jianhong@example.com", "valid", "accepted"), u("周怡君", "yijun@example.com", "valid", "declined"), u("蔡家豪", "jiahao@example.com", "valid", "noreply"), u("黃志偉", "zhiwei@example.com", "invalid", "accepted")] },
+          { id: "b2", venue: "大會議室", cap: 20, date: "2026-11-12", s: "14:00", e: "16:00", subject: "客戶簡報", n: 12, status: "pending", approval: true,
+            invitees: [u("張雅婷", "yating@example.com", "unsent", "noreply"), u("李大華", "dahua@example.com", "unsent", "noreply")] },
+          { id: "b3", venue: "小型討論室 A", cap: 4, date: "2026-11-17", s: "09:30", e: "10:30", subject: "一對一", n: 2, status: "confirmed", series: [1, 4], invitees: [] },
+          { id: "b4", venue: "小型討論室 A", cap: 4, date: "2026-11-20", s: "09:30", e: "10:30", subject: "專案討論", n: 2, status: "confirmed", approval: false, invitees: [] },
+          { id: "b5", venue: "小型討論室 A", cap: 4, date: "2026-11-07", s: "13:00", e: "15:00", subject: "專案檢討", n: 3, status: "checked_in", started: true, past: true,
+            invitees: [u("吳建宏", "jianhong@example.com", "valid", "accepted"), u("蔡家豪", "jiahao@example.com", "valid", "noreply")] },
+          { id: "b6", venue: "培訓教室", cap: 40, date: "2026-11-05", s: "13:00", e: "15:00", subject: "新人訓練", n: 25, status: "cancelled", past: true,
+            invitees: [u("周怡君", "yijun@example.com", "invalid", "accepted"), u("李大華", "dahua@example.com", "invalid", "noreply"), u("張雅婷", "yating@example.com", "invalid", "declined")] },
+        ];
+        var byId = {};
+        data.forEach(function (b) {
+          byId[b.id] = b;
+        });
+        var openId = q.get("open") || (P.state === "empty" ? "b4" : P.state === "loading" || P.state === "error" ? "b1" : null);
+        var tab = q.get("tab") === "past" || (openId && byId[openId] && byId[openId].past) ? "past" : "upcoming";
+        var refreshed = false;
+        var live = h("div", { class: "sr-only", role: "status", "aria-live": "polite" });
+        function say(msg, err) {
+          live.textContent = msg;
+          P.toast(msg, err ? "error" : null);
+        }
+
+        var root = h("div", { tid: "my-bookings" });
+        main.appendChild(root);
+        root.appendChild(P.header("我的預約"));
+        root.appendChild(live);
+        var tabs = h(
+          "div",
+          { class: "tabs", role: "tablist" },
+          h("button", { role: "tab", tid: "my-bookings-tab-upcoming", text: "即將到來", onclick: function () { tab = "upcoming"; draw(); } }),
+          h("button", { role: "tab", tid: "my-bookings-tab-past", text: "已結束", onclick: function () { tab = "past"; draw(); } }),
+        );
+        root.appendChild(tabs);
+        var out = h("div");
+        root.appendChild(out);
+
+        /* ---------- 假的「內層」：面板資料與統計由內層計算，前端只顯示 ---------- */
+        function stats(b) {
+          var v = b.invitees.filter(function (i) { return i.inv === "valid"; });
+          var a = v.filter(function (i) { return i.reply === "accepted"; }).length;
+          var d = v.filter(function (i) { return i.reply === "declined"; }).length;
+          return { total: v.length, accepted: a, declined: d, noreply: v.length - a - d, expected: 1 + a };
+        }
+        // 可否調整：預約狀態一律依代碼判斷（C-SH-01）
+        function adjustReason(b) {
+          if (["checked_in", "completed", "no_show"].indexOf(b.status) >= 0 || b.started) return "預約已開始，無法調整受邀者。";
+          if (b.status === "cancelled") return "預約已取消，無法調整受邀者。";
+          if (b.status === "rejected") return "預約已駁回，無法調整受邀者。";
+          return null;
+        }
+
+        /* ---------- 卡片 ---------- */
+        function item(b) {
+          var li = h("li", { class: "item", tid: "my-bookings-item", "data-id": b.id,
+            "aria-label": b.venue + "，" + P.fmtSpan(b) + "，" + P.statusText(b.status) });
+          li.appendChild(h("div", { class: "top" }, h("span", { class: "title", text: b.venue }),
+            h("span", null, P.statusTag(b.status), b.series ? [" ", h("span", { class: "tag", text: "第 " + b.series[0] + "／" + b.series[1] + " 場" })] : null)));
+          li.appendChild(h("div", { class: "meta", text: P.fmtSpan(b) }));
+          li.appendChild(h("div", { class: "meta wrap-any", text: b.subject + "，" + b.n + " 人" }));
+          if (b.series) return li; // 週期性預約場次沒有邀請，也沒有受邀者按鈕與面板
+          var panelId = "panel-" + b.id;
+          var btn = h("button", { class: "btn sm", type: "button", tid: "invitee-panel-toggle", "aria-expanded": "false", "aria-controls": panelId,
+            text: "受邀者" });
+          var holder = h("div", { id: panelId, role: "region", "aria-labelledby": panelId + "-t", hidden: true });
+          li.appendChild(h("div", { class: "row" }, btn));
+          li.appendChild(holder);
+          var isOpen = false;
+          function toggle(force) {
+            isOpen = force != null ? force : !isOpen;
+            btn.setAttribute("aria-expanded", String(isOpen));
+            holder.hidden = !isOpen;
+            if (isOpen) load(b, holder, panelId);
+          }
+          btn.addEventListener("click", function () { toggle(); });
+          if (openId === b.id) setTimeout(function () { toggle(true); }, 0);
+          return li;
+        }
+
+        /* ---------- 面板 ---------- */
+        function load(b, holder, panelId, retry) {
+          holder.innerHTML = "";
+          var box = h("div", { class: "panel", tid: "invitee-panel" }, h("h3", { id: panelId + "-t", text: "受邀者與出席狀況" }));
+          holder.appendChild(box);
+          var target = openId === b.id;
+          if (!retry && target && P.state === "loading") {
+            box.setAttribute("aria-busy", "true");
+            box.appendChild(h("div", { class: "skel skel-item", tid: "invitee-panel-loading", "aria-label": "載入受邀者資料" }));
+            return; // 原型停在載入狀態供檢視
+          }
+          box.setAttribute("aria-busy", "true");
+          box.appendChild(h("div", { class: "skel skel-item", tid: "invitee-panel-loading", "aria-label": "載入受邀者資料" }));
+          setTimeout(function () {
+            box.removeAttribute("aria-busy");
+            box.querySelector('[data-testid="invitee-panel-loading"]').remove();
+            if (!retry && target && P.state === "error") {
+              if (q.get("kind") === "forbidden") {
+                box.appendChild(h("div", { class: "alert danger", tid: "invitee-panel-error", role: "alert", text: "沒有權限查看這筆預約的受邀者。" }));
+                return;
+              }
+              box.appendChild(h("div", { class: "alert danger", tid: "invitee-panel-error", role: "alert" },
+                h("p", { style: "margin:0 0 8px", text: "無法載入受邀者資料。請稍後按「重新載入」再試一次。" }),
+                h("button", { class: "btn sm", type: "button", tid: "invitee-panel-retry", text: "重新載入", onclick: function () { load(b, holder, panelId, true); } })));
+              return;
+            }
+            body(b, box);
+          }, 450);
+        }
+
+        function body(b, box) {
+          var keep = box.querySelector("h3");
+          box.innerHTML = "";
+          box.appendChild(keep);
+          var list = b.invitees;
+          var cancelled = b.status === "cancelled" || b.status === "rejected";
+          var reason = adjustReason(b);
+
+          // 重新整理
+          var rf = h("button", { class: "btn sm", type: "button", tid: "invitee-refresh", text: "重新整理" });
+          rf.addEventListener("click", function () {
+            rf.disabled = true;
+            rf.textContent = "更新中…";
+            box.setAttribute("aria-busy", "true");
+            setTimeout(function () {
+              if (q.get("fail") === "network") {
+                say("無法更新出席狀況，目前顯示的是舊資料。請稍後再試一次。", true);
+                rf.disabled = false;
+                rf.textContent = "重新整理";
+                box.removeAttribute("aria-busy");
+                return;
+              }
+              if (b.id === "b1" && !refreshed) {
+                refreshed = true;
+                byId.b1.invitees.forEach(function (i) { if (i.email === "dahua@example.com") i.reply = "declined"; }); // 受邀者把「出席」改為「不出席」
+              }
+              body(b, box);
+              say("已更新出席狀況");
+              box.querySelector('[data-testid="invitee-refresh"]').focus();
+            }, 500);
+          });
+          box.appendChild(h("div", { class: "row", style: "justify-content:flex-end" }, rf));
+
+          if (!list.length) {
+            box.appendChild(h("div", { tid: "invitee-panel-empty" }, h("p", { style: "margin:4px 0;font-weight:700", text: "未邀請任何人" }), h("p", { class: "hint", text: "這筆預約沒有受邀者。" })));
+          } else {
+            if (b.status === "pending") {
+              box.appendChild(h("div", { class: "alert warn", tid: "invitee-pending-note", role: "status", text: "預約審核中，核准後才會發送邀請。" }));
+            } else if (!cancelled) {
+              var s = stats(b);
+              box.appendChild(h("div", { class: "stats", tid: "invitee-stats", role: "group", "aria-label":
+                "受邀 " + s.total + " 人，已接受 " + s.accepted + " 人，已婉拒 " + s.declined + " 人，未回覆 " + s.noreply + " 人，預計到場 " + s.expected + " 人；預約人數 " + b.n + " 人，場地容納 " + b.cap + " 人" },
+                h("div", { class: "stat", tid: "invitee-stat-total" }, h("b", { text: s.total }), "受邀 " + s.total + " 人"),
+                h("div", { class: "stat", tid: "invitee-stat-accepted" }, h("b", { text: s.accepted }), "已接受 " + s.accepted + " 人"),
+                h("div", { class: "stat", tid: "invitee-stat-declined" }, h("b", { text: s.declined }), "已婉拒 " + s.declined + " 人"),
+                h("div", { class: "stat", tid: "invitee-stat-noreply" }, h("b", { text: s.noreply }), "未回覆 " + s.noreply + " 人"),
+                h("div", { class: "stat expected", tid: "invitee-stat-expected" }, h("b", { text: s.expected }), "預計到場 " + s.expected + " 人")));
+              box.appendChild(h("div", { class: "compare", tid: "invitee-compare" },
+                h("span", { tid: "invitee-compare-attendees", text: "預約人數 " + b.n + " 人" }), "　｜　",
+                h("span", { tid: "invitee-compare-capacity", text: "場地容納 " + b.cap + " 人" }), h("br"),
+                "預計到場人數 = 你本人 1 人 + 已接受人數"));
+            }
+            var ul = h("ul", { class: "invitee-list", tid: "invitee-list" });
+            list.forEach(function (i) {
+              var tag = i.inv === "unsent" ? h("span", { class: "tag warn", tid: "invitee-unsent-tag", text: "待發送" })
+                : h("span", null, P.replyTag(i.reply, "invitee-reply-tag"), i.inv === "invalid" ? [" ", h("span", { class: "tag danger", tid: "invitee-invalid-tag", text: "邀請已失效" })] : null);
+              var li = h("li", { class: "invitee-item", tid: "invitee-item", "data-id": i.id,
+                "aria-label": i.name + "，" + i.email + "，" + (i.inv === "unsent" ? "待發送" : i.inv === "invalid" ? "邀請已失效" : P.REPLY[i.reply]) },
+                h("span", { class: "who" }, i.name, h("span", { class: "email", text: i.email })), tag);
+              var rm = h("button", { class: "btn sm", type: "button", tid: "invitee-remove", "aria-label": "移除受邀者 " + i.name, text: "移除", disabled: !!reason || i.inv === "invalid" });
+              rm.addEventListener("click", function () { removeDlg(b, i, box, rm); });
+              // 因受邀者帳號停用而失效的邀請（預約仍可調整時）不提供移除；預約不可調整時按鈕停用並附原因
+              if (reason || i.inv !== "invalid") li.appendChild(h("div", { class: "acts" }, rm));
+              ul.appendChild(li);
+            });
+            box.appendChild(ul);
+          }
+
+          if (reason) {
+            box.appendChild(h("p", { class: "hint", id: "adj-" + b.id, tid: "invitee-adjust-disabled-reason", text: reason }));
+          }
+          // 新增受邀者（不可調整時欄位停用並附原因）
+          var ta = h("textarea", { tid: "invitee-add-input", id: "add-" + b.id, rows: "2", disabled: !!reason, placeholder: "name@example.com" });
+          if (q.get("addtext") && b.id === openId) ta.value = q.get("addtext");
+          if (reason) ta.setAttribute("aria-describedby", "adj-" + b.id);
+          var addBtn = h("button", { class: "btn sm primary", type: "button", tid: "invitee-add-submit", text: "新增", disabled: !!reason });
+          var probs = h("div", { tid: "invitee-add-problems", hidden: true, tabindex: "-1" });
+          box.appendChild(h("h4", { text: "新增受邀者" }));
+          box.appendChild(h("div", { class: "inline-form" }, P.field("同事 Email（可一次貼上多個，以逗號、空白或換行分隔）", ta, null, "invitee-add-input-error"), probs, h("div", { class: "row" }, addBtn)));
+          addBtn.addEventListener("click", function () { add(b, ta, addBtn, probs, box); });
+        }
+
+        function reject(b, box) {
+          var f = q.get("fail");
+          if (f === "started") { Object.assign(b, { status: "checked_in", started: true }); say("預約已開始，受邀者沒有變動。", true); body(b, box); return true; }
+          if (f === "cancelled") { b.status = "cancelled"; b.invitees.forEach(function (i) { i.inv = "invalid"; }); say("預約已取消，受邀者沒有變動。", true); body(b, box); return true; }
+          if (f === "network") { say("無法完成這項操作，受邀者沒有變動。請稍後再試一次。", true); return "net"; }
+          return false;
+        }
+
+        function add(b, ta, btn, probs, box) {
+          if (btn.disabled) return;
+          P.fieldErr(ta, "");
+          probs.hidden = true;
+          probs.innerHTML = "";
+          var emails = P.uniqueEmails(P.splitEmails(ta.value));
+          if (!emails.length) return P.fieldErr(ta, "請輸入有效的 Email。"), ta.focus();
+          var badFmt = emails.filter(function (e) { return !P.isEmailFormat(e); });
+          if (badFmt.length) return P.fieldErr(ta, "請輸入有效的 Email。"), ta.focus();
+          btn.disabled = ta.disabled = true; // 重複點擊只新增一次
+          btn.textContent = "新增中…";
+          box.setAttribute("aria-busy", "true");
+          setTimeout(function () {
+            box.removeAttribute("aria-busy");
+            var r = reject(b, box);
+            if (r === true) return;
+            btn.disabled = ta.disabled = false;
+            btn.textContent = "新增";
+            if (r === "net") return;
+            var existing = b.invitees.filter(function (i) { return i.inv !== "invalid"; }).map(function (i) { return P.normEmail(i.email); });
+            var problems = emails.map(function (m) { return { email: m, reason: P.checkEmail(m, existing) }; }).filter(function (p) { return p.reason; });
+            if (problems.length) { // 全有或全無：一個都不新增，內容保留
+              var ul = h("ul");
+              problems.forEach(function (p) { ul.appendChild(h("li", { tid: "invitee-add-problem-item", text: p.email + "：" + p.reason })); });
+              probs.hidden = false;
+              probs.appendChild(h("div", { class: "alert danger", role: "alert" }, "沒有新增任何人。以下 Email 有問題，請修正或移除後再新增：", ul));
+              probs.focus();
+              return;
+            }
+            emails.forEach(function (m) {
+              b.invitees.push({ id: "iv-" + m.split("@")[0], name: P.accountName(m), email: m, inv: b.status === "pending" ? "unsent" : "valid", reply: "noreply" });
+            });
+            body(b, box);
+            say(b.status === "pending" ? "已新增 " + emails.length + " 位受邀者，核准後才會發送邀請。" : "已新增 " + emails.length + " 位受邀者，邀請已發送。");
+          }, 500);
+        }
+
+        var rdlg = null;
+        function removeDlg(b, i, box, trigger) {
+          if (rdlg) rdlg.el.remove();
+          rdlg = P.dialog("invitee-remove-dialog", "要移除這位受邀者嗎？", { alert: true });
+          rdlg.body.appendChild(h("p", { class: "lead", text: i.inv === "unsent" ? i.name + " 尚未收到邀請，移除後不會收到任何通知。" : "移除後，" + i.name + " 會收到「已移出邀請」通知，之後無法再回覆。" }));
+          var ok = h("button", { class: "btn danger", type: "button", tid: "invitee-remove-dialog-confirm", text: "確定移除" });
+          ok.addEventListener("click", function () {
+            ok.disabled = true;
+            ok.textContent = "處理中…";
+            setTimeout(function () {
+              rdlg.close();
+              var r = reject(b, box);
+              if (r) return;
+              b.invitees = b.invitees.filter(function (x) { return x !== i; });
+              body(b, box);
+              say("已移除 " + i.name);
+            }, 450);
+          });
+          rdlg.foot.appendChild(h("button", { class: "btn", type: "button", tid: "invitee-remove-dialog-cancel", text: "先不要移除", onclick: function () { rdlg.close(); } }));
+          rdlg.foot.appendChild(ok);
+          rdlg.open(trigger);
+        }
+
+        function draw() {
+          tabs.children[0].setAttribute("aria-selected", tab === "upcoming");
+          tabs.children[1].setAttribute("aria-selected", tab === "past");
+          out.innerHTML = "";
+          var rows = data.filter(function (b) { return tab === "past" ? b.past : !b.past; });
+          rows.sort(function (a, b) { return a.date + a.s < b.date + b.s ? -1 : 1; });
+          var ul = h("ul", { class: "list", tid: "my-bookings-list" });
+          rows.forEach(function (b) { ul.appendChild(item(b)); });
+          out.appendChild(ul);
+        }
+        draw();
+      })();
+    </script>
+  </body>
+</html>

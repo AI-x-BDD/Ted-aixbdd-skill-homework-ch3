@@ -34,6 +34,7 @@ export function can(user, action, resource) {
     action === "booking:create" ||
     action === "booking:list-own" ||
     action === "favorite:manage" ||
+    action === "invitation:respond" ||
     action === "series:create" ||
     action === "waitlist:own"
   ) {
@@ -45,6 +46,12 @@ export function can(user, action, resource) {
     action === "booking:view" ||
     action === "booking:check-in"
   ) {
+    if (!resource) {
+      return true;
+    }
+    return isOwner(user, resource);
+  }
+  if (action === "invitation:manage") {
     if (!resource) {
       return true;
     }

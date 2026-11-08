@@ -16,7 +16,15 @@ function formatWhen(startAt, endAt) {
 
 export async function notify(
   conn,
-  { userId, type, bookingId, waitlistEntryId, params = {}, now: current },
+  {
+    userId,
+    type,
+    bookingId,
+    waitlistEntryId,
+    invitationId,
+    params = {},
+    now: current,
+  },
 ) {
   const message = notificationMessage(type, params);
   await notificationRepository.insert(conn, {
@@ -25,6 +33,7 @@ export async function notify(
     message,
     booking_id: bookingId ?? null,
     waitlist_entry_id: waitlistEntryId ?? null,
+    invitation_id: invitationId ?? null,
     created_at: current,
   });
 }
@@ -69,6 +78,7 @@ export async function listNotifications(user, query = {}) {
         waitlistEntryId: row.waitlist_entry_id
           ? Number(row.waitlist_entry_id)
           : null,
+        invitationId: row.invitation_id ? Number(row.invitation_id) : null,
         createdAt: toIso(row.created_at),
         readAt: row.read_at ? toIso(row.read_at) : null,
       })),

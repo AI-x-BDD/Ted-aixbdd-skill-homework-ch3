@@ -190,6 +190,7 @@ export async function deactivateUser(actor, userId, bookingIds = []) {
   const waitlistRepository =
     await import("../repositories/waitlistRepository.js");
   const slotRepository = await import("../repositories/slotRepository.js");
+  const { onUserDeactivated } = await import("./invitationService.js");
   return withTransaction(async (conn) => {
     const locked = await userRepository.lockById(conn, userId);
     if (!locked) {
@@ -227,6 +228,8 @@ export async function deactivateUser(actor, userId, bookingIds = []) {
       });
       await slotRepository.deleteByHolder(conn, "hold", entry.id);
     }
+    // 005：停用後其作為受邀者的有效邀請失效，不通知、保留最後的回覆（FR-022）
+    await onUserDeactivated(conn, { userId, now: current });
     await conn.query("UPDATE users SET is_active = 0 WHERE id = :id", {
       id: userId,
     });

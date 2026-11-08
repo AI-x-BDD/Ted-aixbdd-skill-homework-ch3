@@ -3,6 +3,7 @@ import { HttpError } from "../lib/http.js";
 import * as bookingRepository from "../repositories/bookingRepository.js";
 import * as eventRepository from "../repositories/eventRepository.js";
 import { release } from "./slotService.js";
+import * as invitationService from "./invitationService.js";
 
 export async function transition(
   conn,
@@ -48,12 +49,26 @@ export async function transition(
     toStatus: to,
     reason,
   });
+  if (to === "confirmed") {
+    await invitationService.onBookingConfirmed(conn, {
+      bookingId,
+      now: current,
+    });
+  }
   if (to === "rejected" || to === "cancelled" || to === "no_show") {
     await release(conn, {
       venueId: booking.venue_id,
       holderType: "booking",
       holderId: bookingId,
       from: releaseFrom,
+      now: current,
+    });
+  }
+  // 取消或駁回使邀請失效（FR-020）；已報到、未到場、已完成不處理（FR-021）
+  if (to === "cancelled" || to === "rejected") {
+    await invitationService.onBookingEnded(conn, {
+      bookingId,
+      reason,
       now: current,
     });
   }

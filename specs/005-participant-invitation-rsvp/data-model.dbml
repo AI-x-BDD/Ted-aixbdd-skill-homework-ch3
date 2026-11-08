@@ -1,0 +1,284 @@
+Project venue_booking {
+  Note: '''
+    # 資料模型：參與者邀請與出席回覆
+
+    **功能分支**：`005-participant-invitation-rsvp`
+
+    資料庫為 MySQL 8.4 LTS（InnoDB、utf8mb4），沿用 001-venue-booking 的連線與命名慣例：所有表示時間點的欄位為 `DATETIME(3)`，存 UTC，欄位名一律以 `_at` 結尾，欄位 note 標明 UTC（C-SH-02）；連線設定 `time_zone = '+00:00'`，程式與 SQL 不使用 `NOW()`，目前時間一律以參數帶入。主鍵除特別註明外為 `BIGINT AUTO_INCREMENT`。
+
+    本功能的遷移檔為 `backend/src/db/migrations/009_invitations.sql`，只做兩件事：新增 `booking_invitations`（DB-01），以及調整既有的 `notifications`（DB-02）：新增 `invitation_id` 欄位與外鍵、擴充 `chk_notifications_type` 的類型清單。本檔其餘資料表（`users`、`venues`、`booking_series`、`bookings`、`waitlist_entries`）是兩張被異動資料表的外鍵父表（含父表的父表），依 DBML 不支援跨檔引用的限制，自 `specs/001-venue-booking/data-model.dbml` 完整重寫，內容與 001 相同，**不是**本功能新增或修改的資料表，遷移不得重複建立或更動它們。`notifications` 除 `invitation_id`、`type` 的 note 與類型清單外，其餘與 001 相同。
+
+    openapi.yaml 的 x-inner-needs 另外讀寫的 `sessions`、`user_roles`、`rules`（`reminder_minutes`）、`venue_opening_hours`、`venue_reviewers`、`booking_slots`、`booking_events`（本功能不寫入，FR-027）、`booking_defaults`，都是 001、004 已定義、本功能不新增欄位也不新增關聯的資料表，沒有任何一張新表或被異動的表以外鍵指向它們，因此不在本檔重寫，其定義見 `specs/001-venue-booking/data-model.dbml`（`booking_defaults` 見 `specs/004-favorite-venues-and-defaults/data-model.dbml`）。002、003 沒有 `data-model.dbml`，兩者與本功能的資料表無關。
+
+    ## 狀態代碼（C-SH-01）
+
+    本功能不新增也不修改預約或週期性預約批次的狀態代碼，下列清單與 openapi.yaml 的 BookingStatus、SeriesStatus 逐字相同：
+
+    - bookings.status 的 CHECK 清單：pending、confirmed、checked_in、completed、rejected、cancelled、no_show。
+    - booking_series.status 的 CHECK 清單：pending、confirmed、rejected、cancelled。
+
+    邀請有自己的兩組代碼，**不是**預約狀態，不得與上面兩組混用，與 openapi.yaml 的 InvitationStatus、InvitationResponse 逐字相同，僅用於 booking_invitations：
+
+    - booking_invitations.status 的 CHECK 清單：pending、active、invalid。
+    - booking_invitations.response 的 CHECK 清單：none、accepted、declined，預設值 none。
+    - booking_invitations.invalid_reason 的 CHECK 清單：NULL 或 booking_cancelled、removed、account_disabled。
+    - booking_invitations.pending_change 的 CHECK 清單：NULL 或 time、venue。
+
+    資料庫與程式一律以上述英文代碼儲存，不寫中文；中文名稱只出現在 `shared/src/copy.js`。
+
+    ## 交易邊界
+
+    所有交易使用預設的 REPEATABLE READ；遇死結（ER_LOCK_DEADLOCK）或鎖逾時，沿用 001 的重試規則（整個交易隨機 20 到 100 毫秒間隔重試最多 3 次，仍失敗回 409）。本功能沒有檔案系統寫入，不需處理檔案與交易的先後。邀請的狀態變更與回覆一律不寫入 booking_events（FR-027）。
+
+    | 交易 | 範圍 | 失敗處理 |
+    |---|---|---|
+    | 建立單次預約並建立邀請（createBooking） | 在 001 的「建立單次預約」交易內，預約、booking_slots、booking_events 寫入後，為每位去除重複後的受邀者插入 booking_invitations（預約 confirmed 時 status = active、notified_at = 現在，並插入一則 invitation_received 通知帶 invitation_id；預約 pending 時 status = pending、notified_at 為 NULL，不通知） | 整筆回滾：預約、時段、邀請與通知一起不留下（NFR-001）；受邀 Email 驗證在寫入前完成，不通過即不開始寫入；重複送出由 booking_slots 主鍵擋下，每位受邀者只會有一份邀請與一則通知 |
+    | 回覆邀請（respondInvitation） | 先鎖該邀請所屬的 bookings 列，再 `SELECT ... FOR UPDATE` 鎖 booking_invitations 列，重新判定可否回覆（邀請 active、預約 confirmed 且 start_at 尚未到），通過後單一語句更新 response、responded_at、updated_at | 不通過則不寫入並回 409；失敗整筆回滾，回覆維持原值；回覆與取消同時發生時鎖的先後決定結果，取消先處理則邀請已 invalid，回覆被拒；同一值重複送出結果相同，不同值同時送出以最後處理者為準（NFR-002），不產生第二列 |
+    | 新增受邀者（addBookingInvitees） | 鎖 bookings 列，唯讀驗證全部 Email 後，為每位新增者插入 booking_invitations；預約 confirmed 時 status = active、notified_at = 現在並插入 invitation_received 通知，預約 pending 時 status = pending 不通知 | 全有或全無（NFR-004）：任一 Email 未通過驗證則不寫入；唯一鍵 uk_invitations_live 衝突（ER_DUP_ENTRY）代表並行重複新增，整筆回滾並回 400 already_invited，最終只有一份邀請、一則通知 |
+    | 移除受邀者（removeBookingInvitee） | 鎖 bookings 列、再鎖該 booking_invitations 列；active 時改為 invalid（invalid_reason = removed）並插入 invitation_removed 通知；pending 時改為 invalid 不通知；已是 invalid 時不更新、不插入通知 | 整筆回滾，邀請維持原狀；連點兩次因第二次讀到 invalid 而不做任何變更，與單次結果一致（NFR-004）；其他受邀者的列不鎖也不更新 |
+    | 修改預約並同步邀請（updateBooking） | 在 001 的「修改預約（改時間或場地）」交易內，鎖 bookings 後再鎖該預約的 booking_invitations（id 由小到大）；預約 confirmed：time 時把 active 邀請的 response 設為 none、清空 responded_at 與 reminder_sent_at、notified_at 設為現在並插入 invitation_changed 通知，venue 時只插入通知；預約 pending：只更新 active 邀請的 pending_change（time 強於 venue，不降級）；只改主題或人數不動邀請 | 整筆回滾（NFR-003）：新時段主鍵重複、預約更新失敗時，邀請、回覆與通知與預約一起維持原狀 |
+    | 核准預約並發送邀請（approveBooking） | 在 001 的「單筆審核」交易內，條件更新 bookings 為 confirmed 後鎖該預約的 booking_invitations：pending 邀請改為 active、response = none、notified_at = 現在並插入 invitation_received 通知；active 且 pending_change 不為 NULL 的邀請依標記重置或保留並插入 invitation_changed 通知，再把 pending_change 清為 NULL | 整筆回滾：預約維持待審核、邀請維持 pending、不通知；條件更新影響 0 列時沿用 001 回 409「此申請已被處理」 |
+    | 預約取消或駁回使邀請失效（rejectBooking、cancelBooking、adminCancelBooking、deactivateVenue、createMaintenanceWindow、updateMaintenanceWindow、deactivateUser 的預約者側、expirePendingReviews） | 全部經 001 同一個狀態轉換入口，在預約狀態條件更新的同一交易內，鎖該預約的 booking_invitations，pending 與 active 的邀請改為 invalid（invalid_reason = booking_cancelled），保留 response 與 responded_at；原本 active 者插入 invitation_cancelled 通知，原本 pending 者不通知；批次類操作（停用場地、維護時段、停用帳號）在 001 既有的單一大交易內逐筆處理 | 整筆回滾（NFR-003）：預約狀態、時段、邀請與通知一起維持原狀，不出現預約已取消而邀請仍有效的結果 |
+    | 停用帳號使其作為受邀者的邀請失效（deactivateUser 的受邀者側） | 在 001 的「停用帳號」交易內、更新 users.is_active 之前，以 `ORDER BY id FOR UPDATE` 鎖該帳號 invitee_user_id 的 pending 與 active 邀請，改為 invalid（invalid_reason = account_disabled），保留 response；不插入任何通知（FR-022） | 整筆回滾，帳號維持啟用且邀請維持原狀；重新啟用帳號（enableUser）不寫入 booking_invitations，失效的邀請不恢復 |
+    | 排程：受邀者開始前提醒（sendInviteeReminders） | 每份邀請一個交易：`SELECT ... FOR UPDATE SKIP LOCKED` 只鎖 booking_invitations 列（不鎖 bookings，避免與「先鎖預約、再鎖邀請」的路徑形成相反順序），在鎖定下重新確認 reminder_sent_at 仍為 NULL，插入 invitation_reminder 通知並把 reminder_sent_at 設為現在 | 單筆失敗只回滾該筆並記錄日誌，reminder_sent_at 仍為 NULL，下一輪重新掃描補做；重複執行或行程重啟因 reminder_sent_at 已有值而不會重複提醒 |
+    | 讀取邀請與名單（listMyInvitations、getInvitation、listBookingInvitees、listNotifications、markNotificationRead） | 不開交易，單一 SELECT；markNotificationRead 沿用 001 的單一條件更新 notifications.read_at | 無寫入，不需回滾 |
+
+    ## 鎖定順序
+
+    沿用 001 的順序（users 列、booking_series 列、bookings 列、waitlist_entries 列、booking_slots 列），並在 bookings 列之後、waitlist_entries 列之前加入 **booking_invitations 列（同一預約的邀請 id 由小到大）**，即先鎖預約列、再鎖該預約的邀請列，與 openapi.yaml 的鎖定順序一致。取消與回覆都遵守此順序，所以回覆與取消同時發生時只有先取得預約鎖者生效，失效後被接受的回覆為 0 筆。例外：受邀者開始前提醒工作只鎖邀請列、不鎖預約列；停用帳號的受邀者側是以 invitee_user_id 跨預約鎖邀請列，兩者都不先持有 bookings 鎖，仍可能與其他路徑形成鎖的相反順序，由重試處理死結。
+
+    ## 資料庫層檢查約束（遷移以 CHECK 實作，MySQL 8.4 會強制執行）
+
+    - booking_invitations：status 只能是 pending、active、invalid；response 只能是 none、accepted、declined；invalid_reason 為 NULL 或 booking_cancelled、removed、account_disabled；pending_change 為 NULL 或 time、venue。
+    - booking_invitations 的組合限制：status = invalid 時 invalid_reason 不得為 NULL，status 為 pending 或 active 時 invalid_reason 必須為 NULL；status = pending 時 response 必須為 none（待發送尚未通知，不可能有回覆）；response = none 時 responded_at 必須為 NULL，response 為 accepted 或 declined 時 responded_at 不得為 NULL（失效後兩者一起保留）。pending_change 不加與 status 的限制：預約修改後進入審核再被駁回時，邀請改為 invalid 但 pending_change 可保留未清，核准路徑只處理 active，故無影響。
+    - notifications.type 只能是 booking_created、review_result、waitlist_offer、booking_cancelled、review_pending、booking_changed、suspension、waitlist_expired、reminder、invitation_received、invitation_changed、invitation_cancelled、invitation_removed、invitation_reminder（前九種沿用 001，後五種為本功能新增，長度皆不超過 varchar(24)）。
+    - 其餘資料表的檢查約束（bookings、booking_series、waitlist_entries、venues 等）沿用 001，本功能不變。
+
+    ## 邀請狀態轉換的資料庫層保證（FR-026）
+
+    「待發送只能變為有效或已失效、已失效不得再變更並保留最後回覆」無法以 CHECK 表達（CHECK 看不到更新前的值），以 booking_invitations 的 BEFORE UPDATE 觸發器強制，訊息一律為「邀請狀態不可回復」：
+
+    ```sql
+    CREATE TRIGGER trg_booking_invitations_status_guard BEFORE UPDATE ON booking_invitations
+      FOR EACH ROW
+      BEGIN
+        IF OLD.status = 'invalid'
+           AND (NEW.status <> 'invalid' OR NEW.response <> OLD.response
+                OR NOT (NEW.responded_at <=> OLD.responded_at)
+                OR NOT (NEW.invalid_reason <=> OLD.invalid_reason)) THEN
+          SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '邀請狀態不可回復';
+        END IF;
+        IF OLD.status = 'active' AND NEW.status = 'pending' THEN
+          SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '邀請狀態不可回復';
+        END IF;
+      END;
+    ```
+
+    觸發器只擋「已失效後改狀態、改回覆、改失效原因」與「有效退回待發送」；已失效邀請的 updated_at 與 pending_change 仍可更新，所以重複移除不產生變更時也不會觸發錯誤。booking_invitations 不是不可更動資料表，可被更新，也不被任何外鍵設為連鎖刪除或連鎖更新。
+
+    ## 同一預約同一受邀者的唯一性與失效後重新邀請
+
+    `live_user_id` 是 MySQL 的 STORED GENERATED 欄位（`IF(status IN ('pending', 'active'), invitee_user_id, NULL)`），應用程式不得寫入，與 001 的 waitlist_entries.active_dup_key 同樣以註解說明。`UNIQUE (booking_id, live_user_id)` 使同一預約對同一受邀者同時最多一份 pending 或 active 的邀請；失效後 live_user_id 為 NULL，唯一索引不把多個 NULL 視為重複，所以被移除者可再被新增並建立新的一列（FR-025），並行重複新增由唯一鍵擋下（NFR-004），失效的舊列與最後回覆照舊保留。
+
+    ## 遷移對既有資料的影響
+
+    `009_invitations.sql` 的內容與對既有資料的影響：
+
+    1. 建立 `booking_invitations`（含產生欄位 live_user_id、四個 CHECK、組合 CHECK、狀態守衛觸發器、三個索引一個唯一鍵與兩個外鍵）：新表，不影響既有資料；既有預約沒有邀請，不回填、不從歷史資料推導。
+    2. `ALTER TABLE notifications ADD COLUMN invitation_id BIGINT NULL DEFAULT NULL`：既有通知列此欄為 NULL，不回填，不改變任何既有列的值；新增外鍵 fk_notifications_invitation_id 與索引 ix_notifications_invitation，既有列因為值為 NULL 不受外鍵檢查影響。
+    3. `ALTER TABLE notifications DROP CHECK chk_notifications_type, ADD CONSTRAINT chk_notifications_type CHECK (type IN (...十四種...))`：新清單是舊清單的超集合，既有列全部符合，不會因驗證失敗而中止；新增 CHECK 會對既有列驗證，notifications 規模小，執行期間可能短暫鎖表，應避開尖峰；MySQL 8.4 對產生欄位上唯一索引與 CHECK 改寫的實際行為，待遷移在乾淨資料庫與已有 001 至 008 資料的資料庫各執行一次時驗證（未驗證）。
+    4. 順序：必須在 001 至 008 之後；同一檔內先建立 booking_invitations，再修改 notifications（外鍵依賴新表）。
+    5. 回復方式：依相反順序移除 fk_notifications_invitation_id 與 invitation_id 欄位、還原九種類型的 chk_notifications_type，再 DROP booking_invitations；回復前須先刪除或改寫類型為五種邀請類型的通知列，否則舊 CHECK 會驗證失敗。
+
+    ## 外鍵與刪除政策
+
+    所有 Ref 均為 restrict：本系統不物理刪除 users、venues、bookings、booking_series、waitlist_entries、booking_invitations。邀請失效以更新 status 表示，不刪除列，才能保留最後的回覆給受邀者的「我的邀請」。外鍵的基底欄位 invitee_user_id 同時被 STORED 產生欄位引用，MySQL 對這種欄位的外鍵只允許 RESTRICT（不得為 CASCADE、SET NULL），本檔全部使用 restrict 符合此限制。
+  '''
+}
+
+Table users {
+  id bigint [pk, increment, note: '帳號識別']
+  email varchar(254) [not null, note: '登入 Email；寫入與比對前一律去除首尾空白並轉小寫；欄位定序使用 utf8mb4_bin，使不同大小寫或重音符號不被視為同一個信箱；受邀 Email 驗證以此欄比對（對應 x-inner-needs users.email）']
+  name varchar(100) [not null, note: '姓名']
+  password_hash varchar(255) [not null, note: 'scrypt 雜湊字串（參數、鹽、雜湊），沒有可還原的密碼；任何查詢結果都不回傳此欄']
+  is_active tinyint [not null, default: 1, note: '1 啟用，0 已停用；停用後不得登入；受邀 Email 驗證要求為 1']
+  must_change_password tinyint [not null, default: 0, note: '1 表示管理員重設密碼後須先自行改密碼；為 1 時除查詢自己、變更密碼、登出外一律拒絕']
+  suspended_until_at datetime(3) [null, default: null, note: '預約權限暫停到此時間（UTC）；NULL 或不大於目前時間表示未暫停；期滿不需排程，以目前時間比較']
+  no_show_counted_from_at datetime(3) [null, default: null, note: 'UTC；未到場累計的起算下限；達門檻暫停時設為 suspended_until_at，使暫停期間發生的未到場不延長暫停；NULL 表示不設下限']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；建立時間']
+
+  indexes {
+    email [unique, name: 'uk_users_email', note: '供登入查詢與 Email 全系統唯一（FR-001），也供受邀 Email 驗證依 Email 查帳號']
+  }
+
+  Note: '''
+    保存帳號、停用狀態、密碼雜湊、須改密碼旗標、預約權限暫停與未到場累計起點。
+    沿用 001 的資料表，供 booking_invitations、notifications 等的外鍵參照；本功能不修改此表。
+  '''
+}
+
+Table venues {
+  id bigint [pk, increment, note: '場地識別']
+  name varchar(100) [not null, note: '場地名稱，全系統唯一']
+  location varchar(200) [not null, note: '地點']
+  capacity int [not null, note: '容納人數，正整數（CHECK >= 1）']
+  equipment json [not null, default: `(JSON_ARRAY())`, note: '設備名稱字串陣列；搜尋時以 JSON_CONTAINS 判斷是否具備所有指定設備，equipmentOptions 由啟用場地的陣列合併取得']
+  requires_approval tinyint [not null, default: 0, note: '1 表示預約需審核']
+  is_active tinyint [not null, default: 1, note: '1 啟用，0 停用；停用場地不出現在搜尋與行事曆、不接受新預約']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；建立時間']
+
+  indexes {
+    name [unique, name: 'uk_venues_name', note: '供場地名稱唯一（FR-006）']
+  }
+
+  Note: '''
+    保存場地基本資料、是否需審核與啟用狀態；規模在 20 個以內，搜尋時全表掃描即可，故不另建其他索引。
+    沿用 001 的資料表，供 bookings、waitlist_entries 的外鍵參照；邀請列表與詳情讀取其 name、location，本功能不修改此表。
+  '''
+}
+
+Table booking_series {
+  id bigint [pk, increment, note: '批次識別']
+  user_id bigint [not null, note: '預約者']
+  venue_id bigint [not null, note: '場地']
+  frequency varchar(16) [not null, note: 'weekly 每週（間隔 7 天）或 biweekly 每兩週（間隔 14 天）']
+  first_date date [not null, note: '第一場的台北日期']
+  last_date date [not null, note: '最後一場的台北日期；修改單一場次日期時不得晚於此日']
+  start_time time [not null, note: '每場的台北當地開始時分（HH:mm），不是時間點，不含日期與時區換算，場次的 UTC 時間點存於 bookings.start_at']
+  end_time time [not null, note: '每場的台北當地結束時分（HH:mm），不是時間點，可為 24:00:00，場次的 UTC 時間點存於 bookings.end_at']
+  subject varchar(100) [not null, note: '主題']
+  attendees int [not null, note: '人數']
+  status varchar(16) [not null, default: 'pending', note: 'pending 待審核、confirmed 已確認（整批核准，或不需審核的場地直接成立）、rejected 已駁回、cancelled 已取消（逾期未審核或整批所有場次皆已取消）；代碼與 openapi.yaml 的 SeriesStatus 逐字相同（C-SH-01），整批核准後為 confirmed']
+  session_count int [not null, note: '建立時的場次數，略過衝突日期後的實際數量']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；建立時間']
+
+  Note: '''
+    保存一批週期性預約的設定與批次層級狀態；每個場次是 bookings 的一列，以 series_id 與 series_index 關聯。
+    沿用 001 的資料表，供 bookings.series_id 的外鍵參照；週期性場次沒有邀請（FR-001），本功能不修改此表。
+  '''
+}
+
+Table bookings {
+  id bigint [pk, increment, note: '預約識別']
+  user_id bigint [not null, note: '預約者；名單與新增、移除受邀者只允許此帳號本人（授權由服務層以此欄比對）']
+  venue_id bigint [not null, note: '場地']
+  start_at datetime(3) [not null, note: '開始時間（UTC）；邀請是否可回覆、預約是否已開始、提醒時間點都以此欄與目前時間比較']
+  end_at datetime(3) [not null, note: '結束時間（UTC），須晚於 start_at']
+  subject varchar(100) [not null, note: '主題']
+  attendees int [not null, note: '人數，至少 1 且不超過場地容納人數（容納人數由服務層檢查）；與受邀名單互相獨立，不要求相等（FR-005）']
+  status varchar(16) [not null, note: 'pending、confirmed、checked_in、completed、rejected、cancelled、no_show（C-SH-01，與 openapi.yaml 的 BookingStatus 逐字相同）；只能透過狀態轉換入口條件更新，邀請同步掛在同一入口']
+  series_id bigint [null, default: null, note: '所屬週期性批次；單次預約為 NULL；不為 NULL 的場次不支援邀請']
+  series_index int [null, default: null, note: '場次序號，從 1 起；單次預約為 NULL']
+  late_cancel tinyint [not null, default: 0, note: '1 表示預約者在門檻內取消的逾時取消；管理員取消與系統取消不設定']
+  confirmed_at datetime(3) [null, default: null, note: 'UTC；轉為 confirmed 的時間；修改時間或場地後重新確認時更新；待審核為 NULL']
+  reminder_sent_at datetime(3) [null, default: null, note: 'UTC；開始前提醒發送時間；NULL 表示尚未提醒；重新確認時清空']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；送出時間；待審核清單依此由舊到新']
+  updated_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；最後更新時間']
+
+  indexes {
+    (user_id, status, start_at) [name: 'ix_bookings_user_status_start', note: '供持有筆數與批數統計、我的預約分頁、未到場累計、停用帳號影響預覽與提醒對象查詢']
+    (venue_id, start_at, status) [name: 'ix_bookings_venue_start_status', note: '供場地停用與維護時段的影響預覽、報表依場地與開始時間區間取預約列']
+    (status, start_at) [name: 'ix_bookings_status_start', note: '供排程掃描逾期未審核、未到場、完成與開始前提醒，並供待審核清單與受邀者提醒工作篩選 confirmed 且尚未開始的預約']
+    start_at [name: 'ix_bookings_start', note: '供管理員全部預約依開始時間由新到舊並以日期區間篩選']
+    (series_id, series_index) [unique, name: 'uk_bookings_series_index', note: '供同批場次依序列出與取消其後場次；同批序號不重複']
+  }
+
+  Note: '''
+    保存單次預約與週期性預約的每個場次；占用時段另存於 booking_slots，狀態變更紀錄另存於 booking_events。
+    沿用 001 的資料表，本功能不修改此表；邀請的建立、回覆與失效不改變預約的狀態、時段、持有筆數，也不寫入 booking_events（FR-027）。
+  '''
+}
+
+Table waitlist_entries {
+  id bigint [pk, increment, note: '候補識別']
+  user_id bigint [not null, note: '登記者']
+  venue_id bigint [not null, note: '場地']
+  start_at datetime(3) [not null, note: '候補時段開始（UTC）']
+  end_at datetime(3) [not null, note: '候補時段結束（UTC）']
+  subject varchar(100) [not null, note: '主題']
+  attendees int [not null, note: '人數']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；登記時間；順位依 (created_at, id) 由小到大']
+  status varchar(16) [not null, note: 'waiting 等候中、offered 保留中、confirmed 已遞補成立、expired 失效、cancelled 已取消']
+  offer_expires_at datetime(3) [null, default: null, note: 'UTC；保留到期時間，僅 offered 時有值']
+  close_reason varchar(24) [null, default: null, note: '失效或結束原因：offer_timeout、confirm_failed、declined、venue_disabled、account_disabled、started、cancelled；waiting、offered、confirmed 為 NULL']
+  closed_at datetime(3) [null, default: null, note: 'UTC；失效、取消或遞補成立的時間']
+  booking_id bigint [null, default: null, note: '遞補成立後建立的預約；其他為 NULL']
+  active_dup_key tinyint [null, default: null, note: '資料庫產生的欄位（STORED GENERATED ALWAYS AS (IF(status IN waiting 或 offered, 1, NULL))），應用程式不得寫入；配合 uk_waitlist_active_dup 使同一人同場地同起訖只能有一筆等候中或保留中的候補（FR-060）']
+
+  indexes {
+    (venue_id, start_at, end_at, status, created_at) [name: 'ix_waitlist_slot', note: '供同場地同起訖的順位計算、釋出範圍內候補遞補掛勾與停用場地時使候補失效']
+    (user_id, status, created_at) [name: 'ix_waitlist_user_status', note: '供我的候補（等候中、保留中與最近失效）與停用帳號時使候補失效']
+    (status, offer_expires_at) [name: 'ix_waitlist_status_offer', note: '供排程找出保留已到期的候補']
+    (status, start_at) [name: 'ix_waitlist_status_start', note: '供排程找出候補時段已開始而失效，以及每輪對等候中候補重跑遞補掛勾']
+    (user_id, venue_id, start_at, end_at, active_dup_key) [unique, name: 'uk_waitlist_active_dup', note: '同一人同場地同起訖的重複候補由資料庫擋下；active_dup_key 為 NULL 的列不受限制']
+  }
+
+  Note: '''
+    保存候補登記、順位依據、保留期限與失效原因；候補不計入持有筆數，且與 bookings 是不同的表。
+    沿用 001 的資料表，供 notifications.waitlist_entry_id 的外鍵參照；本功能不修改此表。
+  '''
+}
+
+Table booking_invitations {
+  id bigint [pk, increment, note: '邀請識別；對應 x-inner-needs booking_invitations.id；API 的 invitationId；受邀名單依它由小到大排序']
+  booking_id bigint [not null, note: '所屬預約，只有單次預約會有邀請（週期性場次由服務層拒絕，FR-001、FR-023）；對應 x-inner-needs booking_invitations.booking_id']
+  invitee_user_id bigint [not null, note: '受邀者帳號；對應 x-inner-needs booking_invitations.invitee_user_id；我的邀請只回傳等於登入者的列，請求不接受員工編號或帳號識別（NFR-006）；受邀 Email 在建立時解析為此帳號，之後 Email 變更不影響本列']
+  status varchar(12) [not null, note: '邀請狀態（不是預約狀態，C-SH-01）：pending 待發送（預約審核中，尚未通知）、active 有效、invalid 已失效；代碼與 openapi.yaml 的 InvitationStatus 逐字相同（CHECK）；pending 只能變為 active 或 invalid，invalid 不再變更（FR-026，由觸發器 trg_booking_invitations_status_guard 保證）；對應 x-inner-needs booking_invitations.status']
+  response varchar(12) [not null, default: 'none', note: '回覆狀態：none 未回覆、accepted 已接受、declined 已婉拒（CHECK）；代碼與 openapi.yaml 的 InvitationResponse 逐字相同；失效後保留最後的回覆（FR-026），不隨 status 清除；待發送時必為 none；預約時間變更時 active 邀請重置為 none；對應 x-inner-needs booking_invitations.response']
+  invalid_reason varchar(24) [null, default: null, note: '失效原因，僅 status = invalid 時有值（CHECK）：booking_cancelled 預約取消或駁回（含管理員取消、場地停用、維護、審核逾期、預約者帳號停用）、removed 被預約者移除、account_disabled 受邀者帳號停用；預約者名單不列出 removed 的邀請，其餘 invalid 仍列出並標示邀請已失效（FR-014、FR-025）；對應 x-inner-needs booking_invitations.invalid_reason']
+  pending_change varchar(8) [null, default: null, note: '預約因修改而進入重新審核期間，尚待在核准時套用的異動種類（CHECK）：time 時間變更（重置回覆並通知）、venue 只換場地（保留回覆並通知）；time 強於 venue，已有 time 時不降級；核准套用後清為 NULL（FR-019）；對應 x-inner-needs booking_invitations.pending_change']
+  notified_at datetime(3) [null, default: null, note: 'UTC；最近一次把預約資訊通知受邀者的時間（邀請發送、核准後發送、時間或場地變更通知時更新）；待發送為 NULL；開始前提醒以此欄判斷邀請發送時距開始已不足提醒時間者不補發（FR-011）；對應 x-inner-needs booking_invitations.notified_at']
+  reminder_sent_at datetime(3) [null, default: null, note: 'UTC；開始前提醒發送時間；NULL 表示尚未提醒；預約時間變更使回覆重置時清為 NULL，使提醒依新時間重新評估；對應 x-inner-needs booking_invitations.reminder_sent_at']
+  responded_at datetime(3) [null, default: null, note: 'UTC；最後一次回覆的時間；response = none 時為 NULL，回覆被重置時清為 NULL，失效後與 response 一起保留（CHECK）；對應 x-inner-needs booking_invitations.responded_at']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；邀請建立時間；由後端以參數帶入（不使用 NOW()）；對應 x-inner-needs booking_invitations.created_at']
+  updated_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；最後更新時間；每次狀態、回覆、標記或提醒時間變更時由後端以參數帶入；對應 x-inner-needs booking_invitations.updated_at']
+  live_user_id bigint [null, default: null, note: '資料庫產生的欄位（STORED GENERATED ALWAYS AS (IF(status IN pending 或 active, invitee_user_id, NULL)))，應用程式不得寫入；僅在邀請未失效時等於 invitee_user_id，供 uk_invitations_live 使用']
+
+  indexes {
+    (booking_id, live_user_id) [unique, name: 'uk_invitations_live', note: '同一預約對同一受邀者同時最多一份 pending 或 active 的邀請（NFR-001、NFR-004），並行重複新增與重複建立由資料庫擋下；失效後 live_user_id 為 NULL 不受限制，被移除者可重新被邀請；其最左前綴 booking_id 也供外鍵 fk_booking_invitations_booking_id 與依預約鎖定邀請列']
+    (invitee_user_id, status) [name: 'ix_invitations_invitee', note: '供我的邀請列表（invitee_user_id 等於登入者且 status 為 active 或 invalid）、邀請詳情與回覆的本人比對，以及停用帳號時使該受邀者所有 pending 與 active 邀請失效；同時供外鍵 fk_booking_invitations_invitee_user_id']
+    (booking_id, status) [name: 'ix_invitations_booking', note: '供預約者受邀名單與出席統計依預約與狀態讀取，以及預約修改、核准、取消、駁回時依預約與狀態鎖定並處理邀請']
+    (status, reminder_sent_at) [name: 'ix_invitations_reminder', note: '供開始前提醒工作掃描 status = active 且 reminder_sent_at 為 NULL 的邀請，再與 bookings 的 confirmed 且尚未開始者比對']
+  }
+
+  Note: '''
+    保存每一份邀請：受邀者、邀請狀態、回覆、失效原因與提醒時間；一列代表某預約對某位受邀者的一份邀請。
+    邀請失效以更新 status 表示，不物理刪除，才能保留最後的回覆（FR-026）；被移除者重新被新增時建立新的一列，舊列保留。
+    邀請與回覆不改變預約，也不寫入 booking_events（FR-027）；他人的邀請、名單與統計由服務層以 invitee_user_id 與 bookings.user_id 限制，不在資料庫以視圖表達。
+  '''
+}
+
+Table notifications {
+  id bigint [pk, increment, note: '通知識別']
+  user_id bigint [not null, note: '通知的對象，使用者只能看到發給自己的通知；邀請通知只發給受邀者本人，預約者不會收到受邀者回覆產生的通知（FR-009）']
+  type varchar(24) [not null, note: 'booking_created、review_result、waitlist_offer、booking_cancelled、review_pending、booking_changed、suspension、waitlist_expired、reminder 沿用 001；本功能新增 invitation_received 收到邀請、invitation_changed 邀請變更、invitation_cancelled 邀請取消、invitation_removed 移出邀請、invitation_reminder 受邀提醒（CHECK chk_notifications_type 擴充為十四種，最長 20 個字元，不超過欄位長度 24）']
+  message varchar(1000) [not null, note: '事件發生當下組成的繁體中文內容，時間為台北時間；邀請通知同樣固化文案，不隨日後預約異動更新']
+  booking_id bigint [null, default: null, note: '關聯的預約；與預約無關的通知為 NULL']
+  waitlist_entry_id bigint [null, default: null, note: '關聯的候補；與候補無關的通知為 NULL']
+  invitation_id bigint [null, default: null, note: '本功能新增；邀請相關通知所屬的邀請，供畫面從通知一步進入邀請詳情；其餘通知與既有通知為 NULL；邀請失效（取消、移出）後本欄與邀請列都保留，連結仍可進入；對應 x-inner-needs notifications.invitation_id，GET /api/notifications 的 invitationId']
+  created_at datetime(3) [not null, default: `CURRENT_TIMESTAMP(3)`, note: 'UTC；發送時間']
+  read_at datetime(3) [null, default: null, note: 'UTC；已讀時間；NULL 表示未讀；已讀後再次標記不改變']
+
+  indexes {
+    (user_id, created_at, id) [name: 'ix_notifications_user_created', note: '供通知列表依 (created_at, id) 由新到舊分頁']
+    (user_id, read_at) [name: 'ix_notifications_user_read', note: '供導覽列每 30 秒輪詢的未讀數計算']
+    invitation_id [name: 'ix_notifications_invitation', note: '供外鍵 fk_notifications_invitation_id 檢查與維護（InnoDB 外鍵必須有以 invitation_id 開頭的索引，不另建會被隱式建立）；目前沒有依邀請反查通知的 API，不得為此再增加其他索引']
+  }
+
+  Note: '保存站內通知，與產生事件在同一交易寫入；本功能新增 invitation_id 與五種邀請通知類型，既有通知不回填。'
+}
+
+Ref fk_bookings_user_id: bookings.user_id > users.id [delete: restrict]
+Ref fk_bookings_venue_id: bookings.venue_id > venues.id [delete: restrict]
+Ref fk_bookings_series_id: bookings.series_id > booking_series.id [delete: restrict]
+Ref fk_series_user_id: booking_series.user_id > users.id [delete: restrict]
+Ref fk_series_venue_id: booking_series.venue_id > venues.id [delete: restrict]
+Ref fk_waitlist_user_id: waitlist_entries.user_id > users.id [delete: restrict]
+Ref fk_waitlist_venue_id: waitlist_entries.venue_id > venues.id [delete: restrict]
+Ref fk_waitlist_booking_id: waitlist_entries.booking_id > bookings.id [delete: restrict]
+Ref fk_booking_invitations_booking_id: booking_invitations.booking_id > bookings.id [delete: restrict]
+Ref fk_booking_invitations_invitee_user_id: booking_invitations.invitee_user_id > users.id [delete: restrict]
+Ref fk_notifications_user_id: notifications.user_id > users.id [delete: restrict]
+Ref fk_notifications_booking_id: notifications.booking_id > bookings.id [delete: restrict]
+Ref fk_notifications_waitlist_entry_id: notifications.waitlist_entry_id > waitlist_entries.id [delete: restrict]
+Ref fk_notifications_invitation_id: notifications.invitation_id > booking_invitations.id [delete: restrict]

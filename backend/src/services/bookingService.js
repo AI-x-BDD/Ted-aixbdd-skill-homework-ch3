@@ -27,6 +27,7 @@ import { canCheckIn, checkInWindow } from "../domain/checkIn.js";
 import { isOwner } from "../domain/policy.js";
 import * as slotRepository from "../repositories/slotRepository.js";
 import { transition } from "./bookingTransition.js";
+import * as invitationService from "./invitationService.js";
 import { toMyBooking } from "./bookingView.js";
 
 const VALIDATION_RULES = new Set([
@@ -41,20 +42,18 @@ const VALIDATION_RULES = new Set([
 const OCCUPIED_MESSAGE = "該時段已被占用。請改選其他時段，或登記候補。";
 
 // 400 類規則只要出現就回 400，否則回 409；400 類排在前面（FR-008、FR-017）
-function throwViolations(violations, suggestions = null) {
+function throwViolations(violations, suggestions = null, extra = {}) {
   const ordered = [...violations].sort(
     (a, b) =>
       Number(!VALIDATION_RULES.has(a.rule)) -
       Number(!VALIDATION_RULES.has(b.rule)),
   );
   const status = VALIDATION_RULES.has(ordered[0].rule) ? 400 : 409;
-  throw new HttpError(
-    status,
-    ordered[0].message,
-    suggestions
-      ? { violations: ordered, suggestions }
-      : { violations: ordered },
-  );
+  throw new HttpError(status, ordered[0].message, {
+    violations: ordered,
+    ...(suggestions ? { suggestions } : {}),
+    ...extra,
+  });
 }
 
 // 只有唯一未通過的規則是「時段被占用」時才附上建議（FR-001、FR-008）
@@ -259,6 +258,23 @@ export async function createBooking(user, input) {
           violations.push({ rule: "occupied", message: OCCUPIED_MESSAGE });
         }
       }
+      // 受邀 Email 與規則並列驗證（FR-002）：有任何問題時整個交易不寫入任何資料
+      const { invitees, problems: inviteeProblems } =
+        await invitationService.resolveInvitees(conn, {
+          emails: Array.isArray(input.inviteeEmails) ? input.inviteeEmails : [],
+          bookerId: user.id,
+        });
+      const inviteeFailure = inviteeProblems.length
+        ? {
+            inviteeProblems,
+            fields: [
+              {
+                field: "inviteeEmails",
+                message: "以下 Email 有問題，請修正或移除後再送出。",
+              },
+            ],
+          }
+        : {};
       if (violations.length) {
         const suggestions = await suggestionsForOccupiedOnly(
           conn,
@@ -268,7 +284,17 @@ export async function createBooking(user, input) {
           venue,
           rules,
         );
-        throwViolations(violations, suggestions);
+        throwViolations(violations, suggestions, inviteeFailure);
+      }
+      if (inviteeProblems.length) {
+        const list = inviteeProblems
+          .map((item) => `${item.email}：${item.message}`)
+          .join("；");
+        throw new HttpError(
+          400,
+          `預約沒有成立。${list}。請修正或移除後再送出。`,
+          inviteeFailure,
+        );
       }
       const startAt = fromTaipei(input.date, input.startTime);
       const endAt = fromTaipei(input.date, input.endTime);
@@ -295,6 +321,13 @@ export async function createBooking(user, input) {
         reason: null,
       });
       const created = await bookingRepository.findById(conn, id);
+      await invitationService.createInvitations(conn, {
+        booking: created,
+        venue,
+        organizer: { name: user.name },
+        invitees,
+        now: current,
+      });
       if (status === "confirmed") {
         await notify(conn, {
           userId: user.id,
@@ -331,7 +364,7 @@ export async function createBooking(user, input) {
           });
         }
       }
-      return toBooking(created);
+      return { ...toBooking(created), inviteeCount: invitees.length };
     });
     // 預約成立後才更新本人的預設值（004 FR-008）；寫入失敗不影響已成立的預約
     await saveBookingDefaults(user.id, {
@@ -625,6 +658,16 @@ export async function updateBooking(user, bookingId, input) {
           now: current,
         });
       }
+      // 005 邀請同步（FR-017～FR-019）：依資料庫實際的前後值判斷異動種類，同一交易內處理
+      const timeChanged =
+        startAt.getTime() !== new Date(booking.start_at).getTime() ||
+        endAt.getTime() !== new Date(booking.end_at).getTime();
+      const venueChanged = Number(venue.id) !== Number(booking.venue_id);
+      await invitationService.onBookingChanged(conn, {
+        bookingId,
+        changeKind: timeChanged ? "time" : venueChanged ? "venue" : "none",
+        now: current,
+      });
       await notify(conn, {
         userId: user.id,
         type: "booking_changed",

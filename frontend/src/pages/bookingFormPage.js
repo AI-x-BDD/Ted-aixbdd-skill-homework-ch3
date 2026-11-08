@@ -3,6 +3,7 @@ import {
   BOOKING_STATUS_LABELS,
   DEFAULTS_TEXT,
   FAVORITE_TEXT,
+  INVITEE_TEXT,
   REBOOK_TEXT,
 } from "../../../shared/src/copy.js";
 
@@ -20,6 +21,7 @@ import { h } from "../lib/h.js";
 import { endTimeOptions, formatDate, startTimeOptions } from "../lib/time.js";
 import { groupVenues } from "../lib/venueGroups.js";
 import { deriveEndTime, formatDuration, weekdayOf } from "../lib/defaults.js";
+import { parseInviteeEmails } from "../lib/emails.js";
 
 function formatMinutes(minutes) {
   return minutes % 60 === 0 ? `${minutes / 60} 小時` : `${minutes} 分鐘`;
@@ -125,6 +127,273 @@ function setError(el, message) {
       el.removeAttribute("aria-describedby");
     }
   }
+}
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// 005 參與者邀請：預約表單「邀請同事」欄位（ui-contract.md › UI-01）。
+// 只負責輸入、貼上拆列與格式提示；帳號是否存在、停用與自己等規則由後端在送出時判定。
+function buildInviteeField({ rebook }) {
+  const rows = [];
+  let seq = 0;
+  const rowsEl = h("div", { class: "invitee-rows" });
+  const countEl = h("p", {
+    class: "hint invitee-count",
+    testid: "booking-invitees-count",
+    "aria-live": "polite",
+  });
+  const duplicateEl = h("p", {
+    class: "hint",
+    testid: "booking-invitees-duplicate",
+    role: "status",
+    hidden: true,
+    text: INVITEE_TEXT.duplicateHint,
+  });
+  const problemsEl = h("div", {
+    class: "invitee-problems",
+    testid: "booking-invitees-error",
+    role: "alert",
+    tabindex: "-1",
+    hidden: true,
+  });
+  const addBtn = h("button", {
+    class: "btn sm",
+    type: "button",
+    testid: "booking-invitee-add",
+    text: INVITEE_TEXT.addButton,
+    onClick: () => insertRowAt(rows.length, ""),
+  });
+  const bodyEl = h(
+    "div",
+    { testid: "booking-invitees" },
+    h("p", {
+      class: "hint",
+      testid: "booking-invitees-hint",
+      text: INVITEE_TEXT.fieldHint,
+    }),
+    rebook
+      ? h("p", {
+          class: "hint",
+          testid: "booking-invitees-rebook-note",
+          text: INVITEE_TEXT.rebookNote,
+        })
+      : null,
+    problemsEl,
+    rowsEl,
+    addBtn,
+    countEl,
+    duplicateEl,
+  );
+  const clearedEl = h("p", {
+    class: "hint",
+    testid: "booking-invitees-cleared",
+    role: "status",
+    hidden: true,
+    text: INVITEE_TEXT.recurringCleared,
+  });
+  const root = h(
+    "div",
+    { class: "field invitee-field" },
+    h("span", { class: "field-label", text: INVITEE_TEXT.fieldLabel }),
+    bodyEl,
+    clearedEl,
+  );
+
+  function renumber() {
+    rows.forEach((row, index) => {
+      row.labelText.textContent = INVITEE_TEXT.emailLabel(index + 1);
+      row.remove.setAttribute(
+        "aria-label",
+        INVITEE_TEXT.removeButtonLabel(index + 1),
+      );
+    });
+  }
+
+  function refresh() {
+    const seen = new Set();
+    let duplicate = false;
+    for (const row of rows) {
+      const email = row.input.value.trim().toLowerCase();
+      if (!email) continue;
+      if (seen.has(email)) duplicate = true;
+      seen.add(email);
+    }
+    countEl.textContent = seen.size ? INVITEE_TEXT.countLabel(seen.size) : "";
+    duplicateEl.hidden = !duplicate;
+  }
+
+  function checkFormat(row) {
+    const value = row.input.value.trim();
+    const bad = value !== "" && !EMAIL_PATTERN.test(value);
+    row.err.hidden = !bad;
+    row.err.textContent = bad ? INVITEE_TEXT.formatError : "";
+    row.input.setAttribute("aria-invalid", bad ? "true" : "false");
+    return !bad;
+  }
+
+  function handlePaste(event, row) {
+    const text = event.clipboardData?.getData("text") ?? "";
+    const emails = parseInviteeEmails(text);
+    if (emails.length <= 1 && !/[\s,，;；]/.test(text.trim())) {
+      return;
+    }
+    event.preventDefault();
+    const index = rows.indexOf(row);
+    row.input.value = emails[0] ?? "";
+    emails.slice(1).forEach((email, offset) => {
+      insertRowAt(index + 1 + offset, email);
+    });
+    renumber();
+    refresh();
+  }
+
+  function createRow(value) {
+    seq += 1;
+    const errId = `invitee-err-${seq}`;
+    const labelText = h("span", { class: "invitee-label-text" });
+    const input = h("input", {
+      type: "email",
+      testid: "booking-invitee-input",
+      placeholder: INVITEE_TEXT.emailPlaceholder,
+      autocomplete: "off",
+      value,
+      "aria-describedby": errId,
+    });
+    const err = h("div", {
+      class: "err invitee-error",
+      id: errId,
+      testid: "booking-invitee-input-error",
+      hidden: true,
+    });
+    const row = { input, err, labelText, remove: null, wrap: null };
+    row.remove = h("button", {
+      class: "btn sm",
+      type: "button",
+      testid: "booking-invitee-remove",
+      text: INVITEE_TEXT.removeButton,
+      onClick: () => removeRow(row),
+    });
+    input.addEventListener("blur", () => checkFormat(row));
+    input.addEventListener("input", () => refresh());
+    input.addEventListener("paste", (event) => handlePaste(event, row));
+    row.wrap = h(
+      "div",
+      { class: "invitee-item" },
+      h(
+        "div",
+        { class: "invitee-row" },
+        h("label", { class: "invitee-row-label" }, labelText, input),
+        row.remove,
+      ),
+      err,
+    );
+    return row;
+  }
+
+  function insertRowAt(index, value) {
+    const row = createRow(value);
+    rows.splice(index, 0, row);
+    rowsEl.insertBefore(row.wrap, rows[index + 1]?.wrap ?? null);
+    renumber();
+    refresh();
+    return row;
+  }
+
+  function removeRow(row) {
+    if (rows.length === 1) {
+      row.input.value = "";
+      row.err.hidden = true;
+      refresh();
+      return;
+    }
+    rows.splice(rows.indexOf(row), 1);
+    row.wrap.remove();
+    renumber();
+    refresh();
+  }
+
+  function clearProblems() {
+    problemsEl.hidden = true;
+    problemsEl.replaceChildren();
+    for (const row of rows) {
+      row.input.setAttribute("aria-invalid", "false");
+      row.err.hidden = true;
+      row.err.textContent = "";
+    }
+  }
+
+  function reset() {
+    for (const row of rows.splice(0)) row.wrap.remove();
+    insertRowAt(0, "");
+    clearProblems();
+  }
+
+  reset();
+
+  return {
+    root,
+    emails() {
+      const seen = new Set();
+      const out = [];
+      for (const row of rows) {
+        const email = row.input.value.trim().toLowerCase();
+        if (email && !seen.has(email)) {
+          seen.add(email);
+          out.push(email);
+        }
+      }
+      return out;
+    },
+    validate() {
+      let first = null;
+      for (const row of rows) {
+        if (!checkFormat(row)) first ??= row.input;
+      }
+      first?.focus();
+      return first === null;
+    },
+    showProblems(problems) {
+      problemsEl.replaceChildren(
+        h("p", { text: INVITEE_TEXT.problemsTitle }),
+        h(
+          "ul",
+          null,
+          problems.map((item) =>
+            h("li", {
+              testid: "booking-invitees-problem-item",
+              text: INVITEE_TEXT.problemItem(
+                item.email,
+                INVITEE_TEXT.reasonText[item.reason] ?? item.message,
+              ),
+            }),
+          ),
+        ),
+      );
+      problemsEl.hidden = false;
+      for (const row of rows) {
+        const value = row.input.value.trim().toLowerCase();
+        const hit = problems.find((item) => item.email === value);
+        row.input.setAttribute("aria-invalid", hit ? "true" : "false");
+        row.err.hidden = !hit;
+        row.err.textContent = hit
+          ? (INVITEE_TEXT.reasonText[hit.reason] ?? hit.message)
+          : "";
+      }
+      problemsEl.focus();
+    },
+    setRecurring(on) {
+      bodyEl.hidden = on;
+      clearedEl.hidden = !on;
+      if (on) reset();
+    },
+    setDisabled(on) {
+      for (const row of rows) {
+        row.input.disabled = on;
+        row.remove.disabled = on;
+      }
+      addBtn.disabled = on;
+    },
+  };
 }
 
 export async function render(container, params = {}) {
@@ -393,6 +662,10 @@ export async function render(container, params = {}) {
     testid: "booking-recurring-toggle",
     id: "rec-toggle",
   });
+  const invitees = editId ? null : buildInviteeField({ rebook: rebookMode });
+  recToggle.addEventListener("change", () =>
+    invitees?.setRecurring(recToggle.checked),
+  );
   const recFreq = h(
     "select",
     { testid: "booking-recurrence-frequency" },
@@ -598,6 +871,7 @@ export async function render(container, params = {}) {
         attendeesHint,
         h("div", { class: "err", testid: "booking-attendees-error" }),
       ),
+      invitees ? invitees.root : null,
       editId || rebookMode
         ? null
         : h(
@@ -664,6 +938,12 @@ export async function render(container, params = {}) {
 
   function showErrors(error) {
     const violations = error.violations ?? [];
+    if (error.inviteeProblems?.length) {
+      invitees?.showProblems(error.inviteeProblems);
+      if (!violations.length) {
+        return;
+      }
+    }
     errBox.hidden = false;
     const title =
       error.status === 0
@@ -977,6 +1257,7 @@ export async function render(container, params = {}) {
       el.disabled = on;
     }
     submit.disabled = on;
+    invitees?.setDisabled(on);
     submit.textContent = on
       ? REBOOK_TEXT.submitting
       : editId
@@ -1014,7 +1295,8 @@ export async function render(container, params = {}) {
       firstInvalid.focus();
       return false;
     }
-    return true;
+    // Email 格式不符由欄位攔截（ui-contract.md › UI-01 › 錯誤）
+    return invitees ? invitees.validate() : true;
   }
 
   async function submitBooking() {
@@ -1029,7 +1311,10 @@ export async function render(container, params = {}) {
           `預約已更新，目前狀態：${BOOKING_STATUS_LABELS[updated.status] ?? updated.status}。`,
         );
       } else {
-        const created = await post("/api/bookings", payload());
+        const created = await post("/api/bookings", {
+          ...payload(),
+          inviteeEmails: invitees ? invitees.emails() : [],
+        });
         if (rebookMode) {
           showToast(
             created.status === "pending"
@@ -1038,10 +1323,20 @@ export async function render(container, params = {}) {
           );
           window.location.hash = "#/bookings";
         } else {
+          const inviteeCount = created.inviteeCount ?? 0;
           resultPanel(
             created.status === "pending"
               ? `預約申請已送出，等待審核（待審核）。審核期間已為您保留 ${created.date} ${created.startTime}–${created.endTime}。`
               : `預約已成立（已確認）：${created.venueName}，${created.date} ${created.startTime}–${created.endTime}。`,
+            inviteeCount
+              ? h("p", {
+                  testid: "booking-result-invitees",
+                  text:
+                    created.status === "pending"
+                      ? INVITEE_TEXT.resultPendingInvitees(inviteeCount)
+                      : INVITEE_TEXT.resultConfirmedInvitees(inviteeCount),
+                })
+              : null,
           );
         }
       }

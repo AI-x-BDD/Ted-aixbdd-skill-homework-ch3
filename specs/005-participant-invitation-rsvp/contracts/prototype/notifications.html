@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>站內通知</title>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script>
+      /* UI-04 邀請通知：?state=loading|empty|error；?markfail=1 標記已讀失敗 */
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("notifications.html");
+        var VIEW = "查看邀請";
+        var list = [
+          { id: "n1", type: "收到邀請", text: "林審核 邀請你參加：大會議室，2026年11月9日（週一） 15:00–16:00，主題：季度規劃。請回覆是否出席。", at: "2026-11-07 13:50", read: false, inv: "i1" },
+          { id: "n2", type: "邀請變更", text: "張雅婷 的預約時間已變更：培訓教室，改為 2026年11月12日（週四） 13:00–15:00。你先前的回覆已重置，請重新回覆是否出席。", at: "2026-11-07 13:20", read: false, inv: "i3" },
+          { id: "n3", type: "邀請變更", text: "王管理 的預約場地已變更：改為 201 會議室，2026年11月10日（週二） 09:30–10:30。你的回覆維持不變。", at: "2026-11-07 11:05", read: false, inv: "i2" },
+          { id: "n4", type: "邀請取消", text: "周怡君 的預約已取消：201 會議室，2026年11月11日（週三） 16:00–17:00。原因：場地臨時維護。", at: "2026-11-06 17:20", read: true, inv: "i5" },
+          { id: "n5", type: "移出邀請", text: "你已被移出邀請：小型討論室 A，2026年11月4日（週三） 10:00–11:00。", at: "2026-11-03 09:40", read: true, inv: "i6" },
+          { id: "n6", type: "受邀提醒", text: "提醒：林審核 的預約「專案進度同步」將於 13:00 在 小型討論室 A 開始。", at: "2026-11-07 12:30", read: true, inv: "i6" },
+          { id: "n7", type: "預約成立", text: "你的預約已成立：201 會議室，2026年11月9日（週一） 10:00–11:00。", at: "2026-11-06 13:40", read: false, link: ["查看預約", "bookings.html"] },
+        ];
+        var more = [
+          { id: "n8", type: "邀請取消", text: "李大華 的預約已取消：大會議室，2026年10月28日（週三） 09:00–10:00。", at: "2026-10-27 11:00", read: true, inv: "i4" },
+        ];
+        var moreShown = false;
+        var root = h("div", { tid: "notification-page" });
+        main.appendChild(root);
+        root.appendChild(P.header("站內通知"));
+        var summary = h("p", { class: "lead", "aria-live": "polite", tid: "notification-summary" });
+        root.appendChild(summary);
+        var out = h("div");
+        root.appendChild(out);
+
+        function unreadCount() {
+          return list.filter(function (n) { return !n.read; }).length;
+        }
+        function sync() {
+          P.unread = P.state === "empty" ? 0 : unreadCount();
+          P.setBadge();
+          summary.textContent = P.state === "empty" ? "沒有未讀通知" : P.unread ? "共 " + P.unread + " 則未讀" : "沒有未讀通知";
+        }
+        function open(n, li, btn) {
+          var body = li.querySelector(".nbody");
+          var expand = function () { body.hidden = false; btn.setAttribute("aria-expanded", "true"); };
+          if (n.read) {
+            body.hidden = !body.hidden;
+            btn.setAttribute("aria-expanded", String(!body.hidden));
+            return;
+          }
+          li.setAttribute("aria-busy", "true");
+          setTimeout(function () {
+            li.removeAttribute("aria-busy");
+            if (q.get("markfail") === "1") {
+              P.toast("無法標記為已讀。請稍後再試一次。", "error"); // 保留未讀樣式，仍展開內容與「查看邀請」連結
+              expand();
+              return;
+            }
+            n.read = true;
+            draw();
+            sync();
+            var again = out.querySelector('[data-id="' + n.id + '"]');
+            if (again) {
+              again.querySelector(".nbody").hidden = false;
+              again.querySelector("button.nopen").setAttribute("aria-expanded", "true");
+            }
+          }, 300);
+        }
+        function item(n) {
+          var li = h("li", { class: "item", tid: "notification-item", "data-id": n.id,
+            "aria-label": (n.read ? "已讀" : "未讀") + "，" + n.type + "，" + n.at + "，" + n.text });
+          var btn = h("button", { class: "nopen", tid: "notification-open", "aria-expanded": "false",
+            style: "background:none;border:0;padding:0;text-align:left;cursor:pointer;display:block;min-height:44px;width:100%",
+            onclick: function () { open(n, li, btn); } },
+            h("span", { class: "top", style: "display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap" },
+              h("span", { class: "title", style: n.read ? "font-weight:500" : "" },
+                h("span", { class: "tag accent", tid: n.inv ? "notification-type-tag" : null, text: n.type })),
+              h("span", null, h("span", { class: "tag " + (n.read ? "" : "accent"), text: n.read ? "已讀" : "未讀" }), " ", h("span", { class: "hint", text: n.at }))));
+          var body = h("div", { class: "nbody", hidden: true },
+            h("p", { class: "meta wrap-any", style: "margin:6px 0", text: n.text }),
+            n.inv ? h("a", { class: "btn sm", tid: "notification-open-invitation", href: P.link("invitations.html", "id=" + n.inv), text: VIEW })
+              : n.link ? h("a", { class: "btn sm", href: P.link(n.link[1]), text: n.link[0] }) : null);
+          li.appendChild(btn);
+          li.appendChild(body);
+          return li;
+        }
+        function draw() {
+          out.innerHTML = "";
+          if (P.state === "loading") {
+            out.setAttribute("aria-busy", "true");
+            out.appendChild(P.skeleton(5, "notification-page-loading"));
+            return;
+          }
+          out.removeAttribute("aria-busy");
+          if (P.state === "error") {
+            out.appendChild(P.stateBox("error", "notification-page-error", "無法載入通知", "無法載入通知。請稍後按「重新載入」再試一次。", [P.reloadBtn()]));
+            return;
+          }
+          if (P.state === "empty") {
+            out.appendChild(P.stateBox("empty", "notification-page-empty", "目前沒有通知", "預約、審核、候補與邀請的消息會出現在這裡。"));
+            return;
+          }
+          var ul = h("ul", { class: "list", tid: "notification-list" });
+          list.forEach(function (n) { ul.appendChild(item(n)); });
+          out.appendChild(ul);
+          if (!moreShown)
+            out.appendChild(h("div", { class: "row", style: "margin-top:12px" },
+              h("button", { class: "btn", tid: "notification-load-more", text: "載入更多", onclick: function () { moreShown = true; list = list.concat(more); draw(); } })));
+        }
+        /* 未讀數輪詢：每 30 秒一次，頁面隱藏時暫停，回到前景立即更新（原型僅重畫徽章） */
+        setInterval(function () { if (!document.hidden) sync(); }, 30000);
+        document.addEventListener("visibilitychange", function () { if (!document.hidden) sync(); });
+        draw();
+        sync();
+      })();
+    </script>
+  </body>
+</html>

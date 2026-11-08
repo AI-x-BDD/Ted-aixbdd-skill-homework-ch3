@@ -1,0 +1,1680 @@
+openapi: 3.1.0
+info:
+  title: 場地／會議室預約系統 API（005 參與者邀請與出席回覆增量）
+  version: 1.4.0
+  description: |
+    本檔是 001-venue-booking 至 004-favorite-venues-and-defaults 後端 API 在「參與者邀請與出席回覆」功能下的增量契約，涵蓋 plan.md 的 API-01～API-05：
+    - API-01 受邀者邀請 API：列出我的邀請、取得邀請詳情、回覆出席與否（新增，`/api/invitations` 底下三個操作）。
+    - API-02 預約者受邀名單 API：取得名單與出席統計、新增受邀者、移除受邀者（新增，`/api/bookings/{bookingId}/invitations` 底下三個操作）。
+    - API-03 預約建立邀請 API：建立單次預約時帶入受邀 Email（`createBooking` 增量，完整重寫）。
+    - API-04 預約異動同步邀請：修改、取消、駁回、審核逾期、場地與帳號停用時的邀請重置、保留、延後套用與失效，以及各類通知。這些副作用發生在 001～003 既有操作與背景工作內，請求與回應的格式都不變，因此不重複整個操作，而是集中寫在頂層 `x-invitation-side-effects`，每項附該操作新增的 `x-inner-needs`。
+    - API-05 受邀者開始前提醒排程：背景工作，寫在頂層 `x-background-jobs`。
+    另有通知列表與標記已讀的回應多出邀請相關類型與 `invitationId`（`listNotifications`、`markNotificationRead`，完整重寫）。其餘操作（登入、取得目前使用者、取得單筆預約、我的預約列表、週期性預約、候補等）行為不變，沿用 001～004 的契約，本檔不重複。
+
+    共通約定（與 001～004 相同）：
+    - 認證：登入後由伺服器設定 HttpOnly cookie `sid`。除登入外所有操作都需登入，未登入回 401。帳號被標示為須先改密碼（mustChangePassword）時一律 403，訊息為「請先設定新密碼」。非 GET 請求須為 application/json，且帶有 Origin 標頭時必須屬於允許的來源，否則 403。
+    - 角色與授權（NFR-006）：所有帳號皆具備 employee。回覆邀請與讀取自己的邀請對所有已登入且啟用中的帳號開放（授權動作 `invitation:respond`，實際擁有權由服務比對受邀者）；預約者的名單、新增與移除限預約者本人（授權動作 `invitation:manage`，管理員不例外，管理員不能讀取或調整他人預約的受邀名單，也不能代為回覆）。預約權限被暫停的帳號仍可回覆邀請，也仍可查看與調整自己預約的受邀者。授權以伺服器為準，略過畫面直接送出也會被拒絕。
+    - 身分唯一來源：本檔所有操作的路徑、查詢與請求本文都不接受員工編號或受邀者帳號識別；身分只來自階段憑證所對應的使用者。受邀者視角的回應（`Invitation`）與預約者視角的回應（`BookingInvitees`）由兩組各自獨立的資料結構組成，受邀者視角不含預約人數、容納人數、其他受邀者與其回覆。
+    - 時間格式（C-SH-02）：回應與資料結構中所有時間點屬性（名稱以 At 結尾，例如 startAt、endAt、createdAt）一律為 `type: string`、`format: date-time` 的帶 Z 的 ISO 8601 UTC 字串，例如 `2026-11-20T02:00:00.000Z`；使用者輸入的預約時間一律為台北當地（UTC+8）的 `date`（YYYY-MM-DD）加 `startTime`、`endTime`（HH:mm），不接受帶時區或偏移量的時間戳，由伺服器轉為 UTC。本功能自己的請求（回覆、新增受邀者）沒有時間輸入。x-inner-needs 中表示時間點的資料欄位一律以 `_at` 結尾且為 UTC（例如 start_at、notified_at、reminder_sent_at、responded_at、created_at、updated_at）。通知與錯誤訊息含時間時一律以台北時間（UTC+8）書寫，日期格式「{YYYY}年{M}月{D}日（週{X}）」、24 小時制 `HH:mm`、起訖寫成 `HH:mm–HH:mm`，結束時間正好是台北當天結束時寫成 `24:00`。
+    - 狀態代碼（C-SH-01）：預約狀態（BookingStatus）為 pending、confirmed、checked_in、completed、rejected、cancelled、no_show，為英文 snake_case 代碼，與資料庫 CHECK 清單及前端 shared/src/copy.js 逐字相同，中文名稱只作顯示文案。邀請狀態（InvitationStatus：pending 待發送、active 有效、invalid 已失效）與回覆狀態（InvitationResponse：none 未回覆、accepted 已接受、declined 已婉拒）是另外兩組代碼，不屬於預約狀態，不得與 BookingStatus 混用；本檔所有依預約狀態決定的行為一律以 BookingStatus 代碼指稱。
+    - 「現在」一律由伺服器判定：預約是否已開始、邀請是否仍可回覆、受邀者是否仍可調整，都由伺服器依目前時間計算並隨資料回傳（`bookingStarted`、`canRespond`、`canAdjust`），前端不以裝置時鐘判斷。「預約已開始」指預約狀態為 checked_in、completed、no_show，或預約狀態為 pending、confirmed 但現在已不早於開始時間。
+    - 錯誤：失敗回應一律為 Error 結構，訊息為繁體中文，說明發生什麼事與可以怎麼做，不含內部代碼或技術細節。狀態碼：400 格式或規則驗證未通過、401 未登入、403 無權限、404 資源不存在、409 與目前狀態衝突。邀請相關的 409 在 Error.reason 附一個 InviteReason 代碼，供畫面決定文案；受邀 Email 未通過驗證時回 400 並在 Error.inviteeProblems 逐項列出 Email 與原因。
+    - 邀請隱私：非本人的邀請與不存在的邀請一律回同一種 404（訊息「找不到這份邀請」），不洩漏邀請是否存在；他人的名單、統計與回覆永不出現在任何回應中。
+    - 邀請不影響預約（FR-027）：邀請與回覆不改變預約的狀態、時段、持有筆數或 001 任何規則的判定，也不寫入預約狀態的操作紀錄（booking_events）；回覆本身不對預約者產生任何通知。
+    - 預約與邀請同進同退（NFR-001、NFR-003、NFR-004）：建立、修改、取消、駁回與新增、移除受邀者，與其邀請的建立、重置、保留、失效及通知都在同一個資料庫交易內，全有或全無。鎖定順序一律先鎖預約列、再鎖該預約的邀請列。
+    - 本檔未列出僅供測試使用的 /__test/clock、/__test/tick。
+  x-common-inner-needs:
+    description: 所有需登入的操作在授權前都會做階段驗證，這些讀寫不在各操作的 x-inner-needs 重複列出，資料庫端需涵蓋。
+    data:
+      - name: sessions
+        access: read
+        fields: [token_hash, user_id, expires_at]
+      - name: sessions
+        access: write
+        fields: [expires_at]
+      - name: users
+        access: read
+        fields: [id, is_active, must_change_password, suspended_until_at]
+      - name: user_roles
+        access: read
+        fields: [user_id, role]
+    files: []
+servers:
+  - url: http://127.0.0.1:3000
+    description: 本機後端（正式環境同一行程也提供前端靜態檔）
+tags:
+  - name: 我的邀請
+  - name: 受邀名單
+  - name: 預約
+  - name: 通知
+security:
+  - cookieAuth: []
+paths:
+  /api/invitations:
+    get:
+      tags: [我的邀請]
+      summary: 列出我的邀請
+      operationId: listMyInvitations
+      description: |
+        對應 UI-02「瀏覽我的邀請」（`invitation-list`、`invitation-item`，含回覆標籤、邀請已失效、預約審核中、預約已開始標籤與空狀態「目前沒有邀請」）。所有已登入角色，只回傳發給本人的邀請（`invitee_user_id` 等於登入者），不接受任何帳號參數（NFR-006）。
+
+        範圍與排序（FR-007）：只含邀請狀態為 active 與 invalid 的邀請；pending（待發送）的邀請不出現。邀請失效後（預約取消或駁回、被預約者移除、本人帳號停用後重新啟用）仍列出並保留最後的回覆。依預約開始時間由早到晚、再依邀請識別由小到大排序；不分頁，沒有邀請時 `items` 為空陣列、`total` 為 0。
+
+        每項只含受邀者看得到的欄位（FR-008）：預約者姓名、場地名稱與地點、日期、起訖、主題、預約狀態代碼、預約是否已開始、邀請狀態、回覆狀態、目前是否可回覆與不可回覆的原因；不含預約人數、場地容納人數、其他受邀者與其回覆。可回覆與否、已開始與否都由伺服器依目前時間判定。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response, invalid_reason]
+          - name: bookings
+            access: read
+            fields: [id, user_id, venue_id, start_at, end_at, subject, status]
+          - name: venues
+            access: read
+            fields: [id, name, location]
+          - name: users
+            access: read
+            fields: [id, name]
+        files: []
+      responses:
+        "200":
+          description: 我的邀請（可為空）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/invitations/{invitationId}:
+    get:
+      tags: [我的邀請]
+      summary: 取得邀請詳情
+      operationId: getInvitation
+      description: |
+        對應 UI-02「開啟邀請詳情」（`invitation-detail-*`），也是 UI-04 邀請通知連結（`notification-open-invitation`）的目的地。所有已登入角色，只能讀取發給本人的邀請。
+
+        詳情從資料庫即時讀取預約資料，因此預約改期或換場地後立即顯示最新場地與時間，不依賴通知文案（舊通知保留事件發生當下的文案快照）。回應與列表項目是同一個資料結構 `Invitation`：預約者姓名、場地名稱與地點、日期、起訖、主題、邀請狀態、回覆狀態、預約狀態代碼、預約是否已開始、目前是否可回覆與不可回覆的原因；不含預約人數、其他受邀者與其回覆（FR-008）。邀請失效時仍可讀取，保留最後的回覆（`canRespond` 為 false、`cannotRespondReason` 為 `invitation_invalid` 或 `booking_cancelled`／`booking_rejected`）。
+
+        不可回覆原因的判定順序（列表與詳情共用，與回覆被拒絕的 `reason` 一致）：預約狀態為 cancelled → `booking_cancelled`；rejected → `booking_rejected`；邀請狀態為 invalid → `invitation_invalid`；預約狀態為 pending → `booking_pending_review`；預約已開始（含 checked_in、completed、no_show 與現在不早於開始時間）→ `booking_started`；以上皆非且邀請為 active 時可回覆，原因為 null。
+
+        非本人的邀請、不存在的邀請與仍是 pending（待發送）的邀請一律回同一種 404，不洩漏他人資料（NFR-006、SC-007）。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response, invalid_reason]
+          - name: bookings
+            access: read
+            fields: [id, user_id, venue_id, start_at, end_at, subject, status]
+          - name: venues
+            access: read
+            fields: [id, name, location]
+          - name: users
+            access: read
+            fields: [id, name]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/invitationId"
+      responses:
+        "200":
+          description: 邀請詳情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invitation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 邀請不存在、不是本人的邀請，或仍是待發送；三種情形回應完全相同
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  summary: 找不到這份邀請
+                  value:
+                    message: 找不到這份邀請。請回到「我的邀請」確認。
+  /api/invitations/{invitationId}/response:
+    put:
+      tags: [我的邀請]
+      summary: 回覆出席或不出席
+      operationId: respondInvitation
+      description: |
+        對應 UI-02「回覆出席」（`invitation-reply-accept`）、「回覆不出席」（`invitation-reply-decline`）、「回覆被拒絕」「回覆失敗」。語意為「把我的回覆設為某值」而不是切換，因此使用 PUT：重複送出同一個值結果相同（回 200，不產生第二份回覆結果），預約開始前可隨時改變心意，以最後一次回覆為準（FR-009、NFR-002）。所有已登入角色，只能回覆發給本人的邀請；回覆本身不對預約者產生任何通知，不寫入預約的操作紀錄（FR-009、FR-027）。
+
+        流程（交易內先鎖預約列、再鎖邀請列，與取消路徑相同順序，回覆與取消同時發生時只有先處理者生效，失效後仍被接受的回覆為 0 筆）：
+        1. `response` 不是 `accepted` 或 `declined` 回 400（fields 列出 response）。
+        2. 邀請不存在、不是本人的、或仍是 pending 回 404（與詳情相同，不洩漏）。
+        3. 依詳情相同的判定順序檢查是否可回覆；不可回覆時回 409 並在 `reason` 附原因代碼，回覆狀態維持不變（FR-010）：`booking_cancelled`、`booking_rejected`、`invitation_invalid`、`booking_pending_review`、`booking_started`。
+        4. 通過後更新回覆與最後回覆時間，回 200 與更新後的 `Invitation`（含目前的回覆狀態）。
+        同一份邀請同時收到不同回覆時，鎖的先後決定最後值，最後處理的回覆為準（NFR-002）。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response, invalid_reason]
+          - name: booking_invitations
+            access: write
+            fields: [response, responded_at, updated_at]
+          - name: bookings
+            access: read
+            fields: [id, user_id, venue_id, start_at, end_at, subject, status]
+          - name: venues
+            access: read
+            fields: [id, name, location]
+          - name: users
+            access: read
+            fields: [id, name]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/invitationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InvitationReplyInput"
+      responses:
+        "200":
+          description: 回覆已記錄（含重複送出同一個值），回傳更新後的邀請
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invitation"
+        "400":
+          description: response 不是 accepted 或 declined
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                invalidResponse:
+                  summary: 回覆值不合法
+                  value:
+                    message: 回覆內容不正確。請選擇「出席」或「不出席」。
+                    fields:
+                      - field: response
+                        message: 請選擇「出席」或「不出席」。
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 邀請不存在、不是本人的邀請，或仍是待發送
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  summary: 找不到這份邀請
+                  value:
+                    message: 找不到這份邀請。請回到「我的邀請」確認。
+        "409":
+          description: 目前不能回覆，回覆狀態沒有改變。Error.reason 為 booking_cancelled、booking_rejected、invitation_invalid、booking_pending_review、booking_started 之一
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                started:
+                  summary: 預約已開始
+                  value:
+                    message: 預約已開始，回覆沒有成立。
+                    reason: booking_started
+                cancelled:
+                  summary: 預約已取消
+                  value:
+                    message: 預約已取消，回覆沒有成立。
+                    reason: booking_cancelled
+                pendingReview:
+                  summary: 預約審核中
+                  value:
+                    message: 預約審核中，回覆沒有成立。審核完成後即可回覆。
+                    reason: booking_pending_review
+                invalid:
+                  summary: 邀請已失效
+                  value:
+                    message: 邀請已失效，回覆沒有成立。
+                    reason: invitation_invalid
+  /api/bookings/{bookingId}/invitations:
+    get:
+      tags: [受邀名單]
+      summary: 取得預約的受邀名單與出席統計
+      operationId: listBookingInvitees
+      description: |
+        對應 UI-03「展開與收合受邀者面板」「查看受邀名單與統計並與人數並列」「重新整理」「看到未邀請任何人」「無法調整的原因」（再次展開面板與按「重新整理」呼叫同一個操作）。僅預約者本人（授權動作 `invitation:manage`）；管理員與其他員工回 403，不回傳任何名單或人數（NFR-006、SC-007）。預約不存在回 404。週期性預約場次回 409（`booking_recurring`），因為邀請只屬於單次預約（FR-023）。
+
+        回應 `BookingInvitees`：
+        - `items`：該預約 status 為 pending（待發送）或 active（有效）的邀請，以及 status 為 invalid 且失效原因不是「被預約者移除」的邀請（預約取消或駁回、受邀者帳號停用）；被預約者移除的邀請不列出（FR-014、FR-025）。每項含邀請識別、姓名、Email、邀請狀態、回覆狀態與是否可移除。依邀請識別由小到大排序。
+        - `summary`：出席統計，由伺服器以同一個純函式計算（SC-005）。只計邀請狀態為 active 的邀請：`invited` 為其筆數，`accepted`、`declined`、`noReply` 為各回覆狀態的筆數，`expected = 1 + accepted`（預約者本人加已接受人數）；pending 與 invalid 的邀請不計入任何統計（FR-014）。預約狀態為 pending、cancelled、rejected 時為 null（待審核不顯示統計，已取消與已駁回不顯示預計到場人數）；`items` 為空（未邀請任何人）時也為 null（FR-013）。
+        - `attendees`（預約人數）與 `venueCapacity`（場地容納人數）只並列回傳，伺服器不做任何比較、提示或場地建議（FR-016）。
+        - `canAdjust` 與 `adjustBlockedReason`：預約狀態為 pending 或 confirmed 且現在早於開始時間時可調整（可新增與移除），否則不可調整並附原因：`booking_started`（含 checked_in、completed、no_show）、`booking_cancelled`、`booking_rejected`。
+        受邀者回覆後，下次讀取立即反映最新回覆（FR-015），伺服器不快取。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: read
+            fields: [id, user_id, venue_id, start_at, attendees, status, series_id]
+          - name: venues
+            access: read
+            fields: [id, capacity]
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response, invalid_reason]
+          - name: users
+            access: read
+            fields: [id, name, email]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/bookingId"
+      responses:
+        "200":
+          description: 受邀名單與出席統計
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookingInvitees"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 不是這筆預約的預約者（含管理員），或必須先改密碼
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notOwner:
+                  summary: 非本人預約
+                  value:
+                    message: 沒有權限查看這筆預約的受邀者。
+        "404":
+          description: 預約不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  summary: 預約不存在
+                  value:
+                    message: 找不到這筆預約。請重新整理後再試。
+        "409":
+          description: 週期性預約場次不支援邀請（reason 為 booking_recurring）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                recurring:
+                  summary: 週期性預約
+                  value:
+                    message: 週期性預約不支援邀請同事，因此沒有受邀名單。
+                    reason: booking_recurring
+    post:
+      tags: [受邀名單]
+      summary: 新增受邀者
+      operationId: addBookingInvitees
+      description: |
+        對應 UI-03「新增受邀者」（`invitee-add-input`、`invitee-add-submit`、`invitee-add-problems`）與「調整被拒絕」。僅預約者本人；全有或全無（FR-024、NFR-004）。請求只含 Email 清單，不接受員工編號。
+
+        前置檢查（依序，任一未通過即整個請求失敗，名單不變）：預約不存在 404；非本人 403；週期性預約場次 409 `booking_recurring`；預約狀態為 cancelled 409 `booking_cancelled`、rejected 409 `booking_rejected`；預約已開始（含 checked_in、completed、no_show 與現在不早於開始時間）409 `booking_started`（FR-023）。
+
+        Email 驗證（FR-002、FR-024，與建立預約共用同一份規則，一次收集全部問題）：每個 Email 去除前後空白並轉小寫，同一 Email 重複填寫只算一位；須對應系統內啟用中的帳號（否則 `not_found`、`inactive`），不得是預約者自己（`self`，不分大小寫），且不得已在該預約未失效（pending 或 active）的邀請中（`already_invited`）。被移除或已失效的人再次新增時視為新的邀請。任何一個 Email 有問題時整個請求回 400，不新增任何一位，在 `inviteeProblems` 逐項列出 Email 與原因。不比較受邀人數與預約人數或容納人數，也不查詢受邀者其他預約的衝突（FR-005）。
+
+        新增成功：預約為 confirmed 時為每位新增者建立 active 邀請、回覆為 none，並寫入「收到邀請」通知（含預約者姓名、場地、日期、起訖與主題，通知帶 invitation_id）；預約為 pending 時建立 pending（待發送）邀請，不通知（FR-004、FR-024）。不改變其他受邀者的邀請與回覆（FR-023）。回 201 與 `InviteesAdded`（新增人數與更新後的名單與統計）。
+
+        重複送出：同一個新增動作並行送出兩次時，唯一性限制（同一預約同一受邀者最多一份 pending 或 active 邀請，由資料庫保證）使第二個請求回 400 `already_invited`，最終只有一份邀請、一則通知，與單次送出的結果一致（NFR-004、US5-14）。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: read
+            fields: [id, user_id, venue_id, start_at, end_at, subject, attendees, status, series_id]
+          - name: venues
+            access: read
+            fields: [id, name, capacity]
+          - name: users
+            access: read
+            fields: [id, name, email, is_active]
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response, invalid_reason]
+          - name: booking_invitations
+            access: write
+            fields: [booking_id, invitee_user_id, status, response, notified_at, created_at, updated_at]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/bookingId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddInviteesInput"
+      responses:
+        "201":
+          description: 已新增，回傳新增人數與更新後的名單與統計
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteesAdded"
+        "400":
+          description: emails 為空，或有 Email 未通過驗證（inviteeProblems 列出全部有問題的 Email 與原因：not_found、inactive、self、already_invited），沒有新增任何人
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                problems:
+                  summary: 兩個 Email 有問題
+                  value:
+                    message: 沒有新增任何人。nobody@example.com：查無帳號；chen@example.com：不能邀請自己。
+                    fields:
+                      - field: emails
+                        message: 有 Email 未通過驗證。
+                    inviteeProblems:
+                      - email: nobody@example.com
+                        reason: not_found
+                        message: 查無帳號
+                      - email: chen@example.com
+                        reason: self
+                        message: 不能邀請自己
+                alreadyInvited:
+                  summary: 已在受邀名單中
+                  value:
+                    message: 沒有新增任何人。yating@example.com：已在受邀名單中。
+                    inviteeProblems:
+                      - email: yating@example.com
+                        reason: already_invited
+                        message: 已在受邀名單中
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 不是這筆預約的預約者（含管理員）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notOwner:
+                  summary: 非本人預約
+                  value:
+                    message: 沒有權限調整這筆預約的受邀者。
+        "404":
+          description: 預約不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: 目前不能調整受邀者，名單沒有變動。Error.reason 為 booking_recurring、booking_cancelled、booking_rejected、booking_started 之一
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                started:
+                  summary: 預約已開始
+                  value:
+                    message: 預約已開始，受邀者沒有變動。
+                    reason: booking_started
+                cancelled:
+                  summary: 預約已取消
+                  value:
+                    message: 預約已取消，受邀者沒有變動。
+                    reason: booking_cancelled
+  /api/bookings/{bookingId}/invitations/{invitationId}:
+    delete:
+      tags: [受邀名單]
+      summary: 移除受邀者
+      operationId: removeBookingInvitee
+      description: |
+        對應 UI-03「移除受邀者」（`invitee-remove`、`invitee-remove-dialog`）與「調整被拒絕」。僅預約者本人；邀請必須屬於路徑中的預約，否則視同不存在回 404（不洩漏他人邀請）。
+
+        前置檢查同新增受邀者：預約不存在 404；非本人 403；週期性場次 409 `booking_recurring`；cancelled 409 `booking_cancelled`；rejected 409 `booking_rejected`；已開始 409 `booking_started`（FR-023）。通過後交易內先鎖預約列、再鎖邀請列：
+        - 邀請為 active：改為 invalid（失效原因 `removed`），保留最後的回覆，寫入「已移出邀請」通知（含場地、日期與起訖，通知帶 invitation_id），不附原因（FR-025）。
+        - 邀請為 pending：改為 invalid（失效原因 `removed`），不發送任何通知（FR-025、US5-9）。
+        - 邀請已是 invalid（含先前已被移除、受邀者帳號停用）：視為成功、不做任何變更、不產生第二則通知，連點兩次或重複送出的結果與單次一致（NFR-004）。被移除者不再列於預約者的名單與統計，受邀者在「我的邀請」仍看到該邀請標示失效並保留最後回覆。
+        其他受邀者的邀請與回覆都不變（FR-023）。移除後同一位同事可再次被新增，屆時建立新的邀請。回 200 與更新後的名單與統計 `BookingInvitees`。
+      x-inner-needs:
+        data:
+          - name: bookings
+            access: read
+            fields: [id, user_id, venue_id, start_at, end_at, attendees, status, series_id]
+          - name: venues
+            access: read
+            fields: [id, name, capacity]
+          - name: users
+            access: read
+            fields: [id, name, email]
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response, invalid_reason]
+          - name: booking_invitations
+            access: write
+            fields: [status, invalid_reason, updated_at]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/bookingId"
+        - $ref: "#/components/parameters/invitationId"
+      responses:
+        "200":
+          description: 已移除（含重複移除），回傳更新後的名單與統計
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BookingInvitees"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: 不是這筆預約的預約者（含管理員）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notOwner:
+                  summary: 非本人預約
+                  value:
+                    message: 沒有權限調整這筆預約的受邀者。
+        "404":
+          description: 預約不存在，或邀請不存在、不屬於這筆預約
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  summary: 找不到受邀者
+                  value:
+                    message: 找不到這位受邀者。請重新整理後再試。
+        "409":
+          description: 目前不能調整受邀者，名單沒有變動。Error.reason 為 booking_recurring、booking_cancelled、booking_rejected、booking_started 之一
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                started:
+                  summary: 預約已開始
+                  value:
+                    message: 預約已開始，受邀者沒有變動。
+                    reason: booking_started
+  /api/bookings:
+    post:
+      tags: [預約]
+      summary: 建立單次預約（可同時帶入受邀 Email）
+      operationId: createBooking
+      description: |
+        對應 UI-01「送出預約帶入受邀 Email」「顯示有問題的 Email 與原因」「其他規則被拒絕時保留 Email」，也是 001 UI-03、002 UI-02、003、004 的同一個操作（一般預約與再預約共用，請求不含來源預約識別，後端不從來源預約帶入任何受邀者，FR-006）。所有已登入角色皆以一般員工身分為自己預約。週期性預約（`POST /api/booking-series`）、候補遞補確認與修改預約不讀取 `inviteeEmails`，因此不會產生邀請（FR-001）。
+
+        預約流程（沿用 001、003、004，行為不變，以下只標出與邀請有關的步驟）：
+        1. 驗證主題（必填、至多 100 字）與人數（1 以上整數），不合法回 400 並在 fields 列出。
+        2. 讀取場地（不存在回 404、已停用回 409 venue_inactive，兩者都不附建議）。
+        3. 以純函式一次收集 time_unit、end_not_after_start、duration、past、advance、opening_hours、capacity 的違規。
+        4. 在交易內鎖使用者列，檢查預約權限暫停（suspended）與持有上限（quota），兩者都檢查、都列出。受邀者不占用場地時段，也不計入任何人的持有筆數（FR-005）。
+        5. 受邀 Email 驗證（本功能新增，FR-002）：`inviteeEmails` 為選填字串陣列；每個 Email 去除前後空白並轉小寫，同一 Email 重複只算一位；須對應系統內啟用中的帳號（`not_found` 查無帳號、`inactive` 帳號已停用），不得是預約者自己（`self`）。一次收集全部有問題的 Email；任何一個有問題時，整個請求回 400，不建立預約、不占用時段、不建立任何邀請，也不通知任何人，Error.inviteeProblems 逐項列出 Email 與原因，Error.fields 另有 `inviteeEmails` 一項。受邀人數不與 `attendees` 或場地容納人數比較，也不查詢受邀者在同一時段的其他預約（FR-005、US1-11、US1-12）。這個驗證與步驟 3 的規則並列：同時有規則未通過時，同一個回應一併列出 violations 與 inviteeProblems。
+        6. 時段占用以唯讀方式判定（同 001、003）。violations 或 inviteeProblems 非空時整個交易不寫入任何資料。全部通過才寫入預約與 30 分鐘時段占用；寫入時若因併發而主鍵衝突，回滾後回 409 occupied，不留下任何邀請。
+        7. 預約寫入後、仍在同一個交易內為每位去除重複後的受邀者建立邀請：預約狀態為 confirmed 時，邀請為 active、回覆為 none，並為每位受邀者寫入一則「收到邀請」通知（含預約者姓名、場地、日期、起訖與主題，通知帶 invitation_id）；預約狀態為 pending（場地需審核）時，邀請為 pending（待發送），不通知，核准後才發送，駁回或到開始時間仍未審核被自動取消時從未通知（FR-003、FR-004）。邀請與預約同進同退：預約因任何原因失敗，邀請與通知都不會留下（NFR-001、US1-10）。
+        8. 回 201 與預約，`inviteeCount` 為去除重複後的受邀人數（沒有受邀者為 0），供畫面顯示「已發送邀請給 N 位同事」或「核准後才會發送邀請給 N 位同事」。
+
+        重複送出：連續快速送出同一份預約時，預約的重複保證沿用 001（只建立一筆，後送者回 409 occupied），因此每位同事只有一份邀請、只收到一則通知（NFR-001、US1-15）。成立時更新預設值的行為同 004，不變。
+      x-inner-needs:
+        data:
+          - name: users
+            access: read
+            fields: [id, suspended_until_at]
+          - name: users
+            access: read
+            fields: [id, name, email, is_active]
+          - name: venues
+            access: read
+            fields: [id, name, capacity, requires_approval, is_active]
+          - name: venue_opening_hours
+            access: read
+            fields: [venue_id, weekday, open_minute, close_minute]
+          - name: venue_reviewers
+            access: read
+            fields: [venue_id, user_id]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+          - name: bookings
+            access: read
+            fields: [user_id, status, start_at, end_at, series_id]
+          - name: bookings
+            access: write
+            fields:
+              [
+                user_id,
+                venue_id,
+                start_at,
+                end_at,
+                subject,
+                attendees,
+                status,
+                series_id,
+                late_cancel,
+                confirmed_at,
+                reminder_sent_at,
+              ]
+          - name: booking_slots
+            access: read
+            fields: [venue_id, slot_start_at]
+          - name: booking_slots
+            access: write
+            fields: [venue_id, slot_start_at, holder_type, holder_id]
+          - name: booking_events
+            access: write
+            fields:
+              [
+                booking_id,
+                actor_user_id,
+                actor_type,
+                occurred_at,
+                from_status,
+                to_status,
+                reason,
+              ]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+          - name: booking_defaults
+            access: write
+            fields: [user_id, attendees, duration_minutes, updated_at]
+          - name: booking_invitations
+            access: write
+            fields: [booking_id, invitee_user_id, status, response, notified_at, created_at, updated_at]
+        files: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingInput"
+      responses:
+        "201":
+          description: 預約已成立（confirmed，受邀者已收到邀請）或已送出等待審核（pending，邀請待發送）；預約與邀請同時成立
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "400":
+          description: |
+            未通過的規則（violations：time_unit、end_not_after_start、duration、past、advance、opening_hours、capacity）、欄位錯誤（fields：subject、attendees、inviteeEmails），或受邀 Email 有問題（inviteeProblems：not_found、inactive、self）。若同時有時段被占用、持有上限或預約權限暫停，也一併列在同一份 violations；本情形一律不附 suggestions。預約被拒絕，不建立任何邀請
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                inviteeProblems:
+                  summary: 受邀 Email 查無帳號、帳號已停用，預約與邀請都不建立
+                  value:
+                    message: 預約沒有成立。nobody@example.com：查無帳號；zhiwei@example.com：帳號已停用。請修正或移除後再送出。
+                    fields:
+                      - field: inviteeEmails
+                        message: 有 Email 未通過驗證。
+                    inviteeProblems:
+                      - email: nobody@example.com
+                        reason: not_found
+                        message: 查無帳號
+                      - email: zhiwei@example.com
+                        reason: inactive
+                        message: 帳號已停用
+                inviteSelf:
+                  summary: 不能邀請自己
+                  value:
+                    message: 預約沒有成立。chen@example.com：不能邀請自己。請修正或移除後再送出。
+                    inviteeProblems:
+                      - email: chen@example.com
+                        reason: self
+                        message: 不能邀請自己
+                capacity:
+                  summary: 人數超過容納人數（與受邀人數無關）
+                  value:
+                    message: 人數超過容納人數（可容納 6 人）。請減少人數或改選其他場地。
+                    violations:
+                      - rule: capacity
+                        message: 人數超過容納人數（可容納 6 人）。請減少人數或改選其他場地。
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 場地不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                venueGone:
+                  summary: 場地不存在
+                  value:
+                    message: 找不到這個場地。請重新整理後再選擇場地。
+        "409":
+          description: |
+            時段已被占用（occupied）、已達持有上限（quota）、預約權限暫停（suspended，訊息含台北時間的解除時間）、場地已停用（venue_inactive）。violations 只有 occupied 一項時附 suggestions；occupied 與 quota 或 suspended 並列時不附；venue_inactive 不附。預約被拒絕，不建立任何邀請與通知
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                occupiedWithSuggestions:
+                  summary: 只有時段被占用，附同場地空檔與其他可用場地
+                  value:
+                    message: 該時段已被占用。請改選其他時段，或登記候補。
+                    violations:
+                      - rule: occupied
+                        message: 該時段已被占用。請改選其他時段，或登記候補。
+                    suggestions:
+                      slots:
+                        before:
+                          startAt: "2026-11-20T01:00:00.000Z"
+                          endAt: "2026-11-20T02:00:00.000Z"
+                        after:
+                          startAt: "2026-11-20T03:00:00.000Z"
+                          endAt: "2026-11-20T04:00:00.000Z"
+                      noSlotsToday: false
+                      venues:
+                        - venueId: 3
+                          name: 星河會議室
+                          capacity: 10
+                          requiresApproval: false
+                venueInactive:
+                  summary: 場地已停用
+                  value:
+                    message: 這個場地已停用，無法預約。請改為一般預約，選擇其他場地。
+                    violations:
+                      - rule: venue_inactive
+                        message: 這個場地已停用，無法預約。請改為一般預約，選擇其他場地。
+  /api/notifications:
+    get:
+      tags: [通知]
+      summary: 我的通知列表（含五種邀請通知）
+      operationId: listNotifications
+      description: |
+        對應 UI-04「看到五種邀請通知」，也是 001 UI-06「瀏覽通知列表」的同一個操作。所有已登入角色，查詢一律限定目前使用者，只看得到發給自己的通知。依發送時間由新到舊（同時間依識別由新到舊），預設每頁 50 筆；回應附未讀數。通知內容在事件發生當下以台北時間組成。
+
+        本功能的變動：`type` 多五種邀請類型 `invitation_received`（收到邀請）、`invitation_changed`（邀請變更）、`invitation_cancelled`（邀請取消）、`invitation_removed`（移出邀請）、`invitation_reminder`（受邀提醒），每則通知多一個 `invitationId`（邀請相關通知為該邀請的識別，其餘通知為 null），讓畫面從通知一步進入 `#/invitations/:invitationId`，邀請失效後（取消、移出）連結仍可進入並顯示「邀請已失效」與最後的回覆。邀請通知只發給受邀者本人；預約者不會收到受邀者回覆產生的任何通知（FR-009）。五種通知的內容在 x-invitation-side-effects 與 x-background-jobs 各項說明。
+      x-inner-needs:
+        data:
+          - name: notifications
+            access: read
+            fields:
+              [
+                id,
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                invitation_id,
+                created_at,
+                read_at,
+              ]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/offset"
+      responses:
+        "200":
+          description: 通知分頁
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/notifications/{notificationId}/read:
+    post:
+      tags: [通知]
+      summary: 標記通知為已讀
+      operationId: markNotificationRead
+      description: 對應 UI-04「開啟通知並標為已讀」，也是 001 UI-06「開啟通知」的同一個操作。所有已登入角色。只能標記發給自己的通知，他人的通知視同不存在回 404。已讀的通知再次標記不改變已讀時間，仍回 200。回傳該則通知（邀請相關通知含 invitationId）與最新未讀數。
+      x-inner-needs:
+        data:
+          - name: notifications
+            access: write
+            fields: [id, user_id, read_at]
+          - name: notifications
+            access: read
+            fields:
+              [
+                id,
+                user_id,
+                type,
+                message,
+                booking_id,
+                waitlist_entry_id,
+                invitation_id,
+                created_at,
+                read_at,
+              ]
+        files: []
+      parameters:
+        - $ref: "#/components/parameters/notificationId"
+      responses:
+        "200":
+          description: 已標記
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationReadResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: 通知不存在或不是發給本人的通知
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                notFound:
+                  summary: 通知不存在
+                  value:
+                    message: 找不到這則通知。請重新整理後再試。
+x-invitation-side-effects:
+  description: |
+    API-04 預約異動同步邀請。下列操作與背景工作的請求與回應格式都不變，只是在各自既有的交易內增加對邀請的處理，因此不重複整個操作；每項只列出該操作因邀請同步而新增的 `x-inner-needs`，操作原有的讀寫維持 001、003 的 x-inner-needs 不變。所有預約狀態變更（預約者取消、管理員取消、場地停用、維護時段、帳號停用、審核駁回、審核逾期自動取消、審核核准）都經過同一個狀態轉換入口，邀請同步掛在該入口，日後新增取消入口也不會漏掉（FR-020）。邀請的狀態變更一律不寫入 booking_events（FR-027）。
+
+    通用規則：
+    - 週期性預約場次沒有邀請，下列處理只對有邀請的單次預約生效；沒有邀請時完全不做任何事。
+    - 鎖定順序：先鎖預約列、再鎖該預約的邀請列。
+    - 邀請服務只讀寫邀請與通知，不改變預約的狀態、時段、持有筆數（FR-027）。
+    - 通知只發給受邀者本人，內容在事件發生當下以台北時間組成並固化於 message，不隨日後預約異動更新；通知皆帶 invitation_id，並在交易內寫入，事件發生後 1 分鐘內可在站內看到（NFR-005）。
+  operations:
+    - operationId: updateBooking
+      method: PUT
+      path: /api/bookings/{bookingId}
+      outerNeeds: UI-03「看到邀請變更通知」「受邀者面板反映重置與保留」、UI-02 回覆被重置後可再次回覆。
+      trigger: 預約者修改預約成功（001、003 的修改預約，僅預約者本人）。
+      result: |
+        依資料庫實際的前後值判斷異動種類：開始或結束時間與修改前不同為 time；時間相同但場地不同為 venue；兩者皆相同（只改主題或人數）為 none，完全不呼叫邀請處理，邀請、回覆與通知都不變（FR-018）。修改失敗（時段被占用等）時整個交易回滾，邀請、回覆與通知都不變（US4-5、NFR-003）。
+        修改後預約為 confirmed（FR-017、FR-018）：對該預約 status 為 active 的邀請，time 時把回覆重置為 none、清除最後回覆時間與提醒時間、把通知時間設為現在，並寫入「邀請變更」通知（含預約者姓名、新場地、新日期與起訖，並說明回覆已重置請重新回覆）；venue 時保留回覆，只寫入「邀請變更」通知（含新場地，說明回覆維持不變）；同時改場地與時間依 time 處理並含新場地。status 為 pending（待發送）的邀請不受影響。
+        修改後預約為 pending（需重新審核，FR-019）：不重置、不通知，只把 active 邀請的延後套用標記（pending_change）更新為較強的一種（time 強於 venue，已有 time 時不降級）；審核期間受邀者不能回覆（respondInvitation 回 409 booking_pending_review），重置與通知延到預約重新變為 confirmed 時才發生（見 approveBooking）。
+        預約被修改多次時，每次日期或起訖時間的變更各自重置一次回覆並通知（邊界情況）。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response, pending_change]
+          - name: booking_invitations
+            access: write
+            fields: [response, responded_at, reminder_sent_at, notified_at, pending_change, updated_at]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+    - operationId: approveBooking
+      method: POST
+      path: /api/reviews/bookings/{bookingId}/approve
+      outerNeeds: UI-01 成功說明「核准後才會發送邀請」的兌現、UI-03 待發送轉為有效、UI-04 收到邀請通知與延後的邀請變更通知。
+      trigger: 審核者核准單筆待審核申請，預約變為 confirmed。
+      result: |
+        對該預約 status 為 pending（待發送）的邀請改為 active、回覆為 none、通知時間設為現在，並為每位受邀者寫入「收到邀請」通知（FR-004、SC-002）。
+        對 status 為 active 且延後套用標記不為空的邀請（預約因修改而進入審核）依標記套用 updateBooking 描述的重置或保留並寫入「邀請變更」通知，再清除標記（FR-019、US4-7）。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response, pending_change]
+          - name: booking_invitations
+            access: write
+            fields: [status, response, responded_at, reminder_sent_at, notified_at, pending_change, updated_at]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+    - operationId: rejectBooking
+      method: POST
+      path: /api/reviews/bookings/{bookingId}/reject
+      outerNeeds: UI-03 待審核預約被駁回後名單標示「邀請已失效」、UI-04 取消通知。
+      trigger: 審核者駁回待審核申請，預約變為 rejected。
+      result: 該預約所有 pending 與 active 的邀請改為 invalid（失效原因 booking_cancelled），保留最後的回覆（FR-020、FR-026）。原本 active 的邀請（因修改而回到審核的預約）寫入「邀請取消」通知（含場地、日期、起訖，有駁回原因時附上）；原本 pending 的邀請從未發送，不通知（US1-9、US4-8）。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response]
+          - name: booking_invitations
+            access: write
+            fields: [status, invalid_reason, updated_at]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+    - operationId: cancelBooking
+      method: POST
+      path: /api/bookings/{bookingId}/cancel
+      outerNeeds: UI-04 取消通知、UI-02 取消後不可回覆、UI-03 名單標示「邀請已失效」。
+      trigger: 預約者取消預約，預約變為 cancelled。
+      result: 同 rejectBooking 的失效規則：該預約所有 pending 與 active 的邀請改為 invalid（失效原因 booking_cancelled）；原本 active 的邀請寫入「邀請取消」通知（含預約者姓名、場地、日期、起訖），原本 pending 的邀請不通知（US4-9、US4-12）。取消後的回覆一律被拒絕（respondInvitation 回 409 booking_cancelled，SC-006）。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response]
+          - name: booking_invitations
+            access: write
+            fields: [status, invalid_reason, updated_at]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+    - operationId: adminCancelBooking
+      method: POST
+      path: /api/admin/bookings/{bookingId}/cancel
+      outerNeeds: UI-04 取消通知含取消原因。
+      trigger: 管理員填寫原因後取消預約，預約變為 cancelled。
+      result: 同 cancelBooking，且原本 active 的邀請的「邀請取消」通知附上管理員填寫的取消原因（US4-10）。管理員不能因此讀取名單或統計。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response]
+          - name: booking_invitations
+            access: write
+            fields: [status, invalid_reason, updated_at]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+    - operationId: deactivateVenue
+      method: POST
+      path: /api/admin/venues/{venueId}/deactivate
+      outerNeeds: UI-04 取消通知、UI-03 名單標示「邀請已失效」。
+      trigger: 管理員確認停用場地，受影響預約被以管理員身分取消（原因「場地停用」）。
+      result: 每筆被取消的預約經同一個狀態轉換入口，依 cancelBooking 的規則使邀請失效並通知；取消通知附原因「場地停用」（US4-11）。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response]
+          - name: booking_invitations
+            access: write
+            fields: [status, invalid_reason, updated_at]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+    - operationId: createMaintenanceWindow
+      method: POST
+      path: /api/admin/venues/{venueId}/maintenance-windows
+      outerNeeds: UI-04 取消通知、UI-03 名單標示「邀請已失效」。
+      trigger: 管理員確認新增維護時段，時段內尚未開始的預約被以管理員身分取消（原因「場地維護」）。
+      result: 同 deactivateVenue：每筆被取消的預約依 cancelBooking 的規則使邀請失效並通知，取消通知附原因「場地維護」（US4-11）。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response]
+          - name: booking_invitations
+            access: write
+            fields: [status, invalid_reason, updated_at]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+    - operationId: updateMaintenanceWindow
+      method: PUT
+      path: /api/admin/venues/{venueId}/maintenance-windows/{windowId}
+      outerNeeds: UI-04 取消通知、UI-03 名單標示「邀請已失效」。
+      trigger: 管理員確認編輯維護時段，新範圍內尚未開始的預約被取消（原因「場地維護」）。
+      result: 同 createMaintenanceWindow。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response]
+          - name: booking_invitations
+            access: write
+            fields: [status, invalid_reason, updated_at]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+    - operationId: deactivateUser
+      method: POST
+      path: /api/users/{userId}/deactivate
+      outerNeeds: UI-03 受邀者帳號停用後名單標示「邀請已失效」且不計入統計；預約者帳號停用時 UI-04 取消通知。
+      trigger: 管理員確認停用帳號。
+      result: |
+        停用的帳號作為預約者：其受影響預約被以管理員身分取消（原因「管理員停用帳號」），依 cancelBooking 的規則使邀請失效並通知受邀者（US4-15）。
+        停用的帳號作為受邀者：在同一個交易內、停用帳號之前，把該帳號所有 pending 與 active 的邀請改為 invalid（失效原因 account_disabled），保留最後的回覆，不通知預約者也不通知該受邀者（FR-022、US4-14、US3-11）。帳號重新啟用（enableUser）不處理邀請，失效的邀請不恢復。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response]
+          - name: booking_invitations
+            access: write
+            fields: [status, invalid_reason, updated_at]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+    - operationId: expirePendingReviews
+      method: background-job
+      path: x-background-jobs.expirePendingReviews（001）
+      outerNeeds: UI-04 取消通知、UI-03 名單標示「邀請已失效」、US1-9 待審核期間從未收到邀請。
+      trigger: 001 的 expirePendingReviews：待審核預約開始時間已到而被系統自動取消。
+      result: 經同一個狀態轉換入口，依 cancelBooking 的規則使邀請失效；pending（待發送）的邀請從未發送，不通知，已收過邀請者收到「邀請取消」通知（原因「未於開始前完成審核」）。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response]
+          - name: booking_invitations
+            access: write
+            fields: [status, invalid_reason, updated_at]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+        files: []
+x-background-jobs:
+  description: |
+    背景排程（API-05）不是 HTTP 操作，沿用 001 的排程機制：每 30 秒（SCAN_INTERVAL_MS）執行一輪，若上一輪未完成則略過；「現在」取自可注入的時鐘。工作是「查詢到期列加逐筆處理」，交易內以 FOR UPDATE SKIP LOCKED 取最多 100 列，單筆失敗只記錄日誌並繼續；所有判斷只看資料庫狀態與時間，行程重啟後第一輪補做所有到期工作，重複執行不會重複提醒。提醒須在到期時間點後 1 分鐘內產生（NFR-005）。本節只列本功能新增的工作；001 既有的工作不變。
+  jobs:
+    - name: sendInviteeReminders
+      trigger: |
+        邀請狀態為 active、回覆為 none（未回覆）或 accepted（已接受）、尚未提醒（reminder_sent_at 為空），所屬預約狀態為 confirmed 且開始時間未到，現在已進入「開始時間減提醒分鐘」之後（提醒分鐘取自規則 reminder_minutes，與 001 提醒預約者共用同一個值，預設 30 分鐘），且邀請最近一次發送時間（notified_at）不晚於「開始時間減提醒分鐘」（邀請發送時距開始已不足提醒時間者不補發，FR-011、US2-14）。
+        不提醒的情形全部寫在查詢條件內：回覆為 declined（已婉拒）、邀請為 pending 或 invalid、預約為 pending（含修改後重新審核中）、cancelled 等非 confirmed 狀態（US2-13、US2-15、US2-16）。預約被修改時間後，回覆重置會清除 reminder_sent_at 並更新 notified_at，工作依新時間重新評估。
+      result: 為符合條件的受邀者寫入一則「受邀提醒」通知（含預約者姓名、主題、場地與開始時間，帶 invitation_id）並把 reminder_sent_at 設為現在；每份邀請對同一個開始時間只提醒一次。只鎖邀請列，不鎖預約列，避免與「先鎖預約、再鎖邀請」的其他路徑形成相反的鎖定順序。
+      x-inner-needs:
+        data:
+          - name: booking_invitations
+            access: read
+            fields: [id, booking_id, invitee_user_id, status, response, notified_at, reminder_sent_at]
+          - name: booking_invitations
+            access: write
+            fields: [reminder_sent_at, updated_at]
+          - name: bookings
+            access: read
+            fields: [id, user_id, venue_id, start_at, subject, status]
+          - name: venues
+            access: read
+            fields: [id, name]
+          - name: users
+            access: read
+            fields: [id, name]
+          - name: notifications
+            access: write
+            fields: [user_id, type, message, booking_id, invitation_id, created_at]
+          - name: rules
+            access: read
+            fields: [rule_key, int_value]
+        files: []
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: sid
+      description: 登入後由伺服器設定的 HttpOnly 階段憑證
+  responses:
+    Unauthorized:
+      description: 未登入或登入已逾時
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            notLoggedIn:
+              summary: 未登入
+              value:
+                message: 登入已逾時。請重新登入。
+    Forbidden:
+      description: 沒有權限、必須先改密碼（訊息「請先設定新密碼」），或請求來源不被允許
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            mustChangePassword:
+              summary: 須先改密碼
+              value:
+                message: 請先設定新密碼。
+  parameters:
+    bookingId:
+      name: bookingId
+      in: path
+      required: true
+      schema:
+        type: integer
+    invitationId:
+      name: invitationId
+      in: path
+      required: true
+      schema:
+        type: integer
+    notificationId:
+      name: notificationId
+      in: path
+      required: true
+      schema:
+        type: integer
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    offset:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+  schemas:
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: 繁體中文，說明發生什麼與可以怎麼做，不含內部代碼或技術細節，也不透露占用時段者是誰、其預約主題或人數，不含任何他人的邀請、名單、統計或回覆；訊息中的時間以台北時間（UTC+8）書寫
+          examples:
+            - 找不到這份邀請。請回到「我的邀請」確認。
+            - 預約已開始，回覆沒有成立。
+            - 預約已取消，回覆沒有成立。
+            - 預約審核中，回覆沒有成立。審核完成後即可回覆。
+            - 邀請已失效，回覆沒有成立。
+            - 預約已開始，受邀者沒有變動。
+            - 預約已取消，受邀者沒有變動。
+            - 沒有權限查看這筆預約的受邀者。
+            - 預約沒有成立。nobody@example.com：查無帳號。請修正或移除後再送出。
+            - 沒有新增任何人。yating@example.com：已在受邀名單中。
+            - 人數超過容納人數（可容納 4 人）。請減少人數或改選其他場地。
+            - 該時段已被占用。請改選其他時段，或登記候補。
+            - 請先設定新密碼。
+        fields:
+          type: array
+          description: 欄位層級的錯誤，供前端標示在欄位下方
+          items:
+            $ref: "#/components/schemas/FieldError"
+        violations:
+          type: array
+          description: 預約規則未通過的清單，每項含規則代號與說明；同一次請求的全部未通過規則並列於此，包含 occupied
+          items:
+            $ref: "#/components/schemas/Violation"
+        suggestions:
+          $ref: "#/components/schemas/Suggestions"
+        reason:
+          $ref: "#/components/schemas/InviteReason"
+        inviteeProblems:
+          type: array
+          description: 受邀 Email 未通過驗證的清單，一次列出全部有問題的 Email；只出現在建立預約與新增受邀者的 400 回應，此時沒有建立預約、沒有新增任何受邀者
+          items:
+            $ref: "#/components/schemas/InviteeProblem"
+    FieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          description: 對應請求欄位名稱，例如 subject、attendees、date、inviteeEmails、emails、response
+        message:
+          type: string
+    Violation:
+      type: object
+      required: [rule, message]
+      properties:
+        rule:
+          type: string
+          description: 規則代號；畫面依代號決定文案。400 類：time_unit、end_not_after_start、duration、past、advance、opening_hours、capacity；409 類：occupied、quota、suspended、venue_inactive
+          enum:
+            - time_unit
+            - duration
+            - end_not_after_start
+            - past
+            - advance
+            - opening_hours
+            - capacity
+            - occupied
+            - quota
+            - suspended
+            - venue_inactive
+        message:
+          type: string
+          description: 繁體中文，說明未通過的原因與可以怎麼做；暫停類訊息含以台北時間書寫的解除時間
+    InviteReason:
+      type: string
+      description: 邀請相關 409 的原因代碼，畫面依代碼決定文案；booking_recurring 為週期性預約不支援邀請，booking_cancelled／booking_rejected／booking_started／booking_pending_review 依預約狀態代碼與開始時間判定，invitation_invalid 為邀請已失效（被移出或帳號停用）
+      enum:
+        - booking_started
+        - booking_cancelled
+        - booking_rejected
+        - booking_pending_review
+        - booking_recurring
+        - invitation_invalid
+    InviteeProblem:
+      type: object
+      description: 一個有問題的受邀 Email 與原因
+      required: [email, reason, message]
+      properties:
+        email:
+          type: string
+          description: 去除前後空白並轉小寫後的 Email
+        reason:
+          type: string
+          enum: [not_found, inactive, self, already_invited]
+          description: 查無帳號、帳號已停用、不能邀請自己、已在受邀名單中（只在新增受邀者出現）
+        message:
+          type: string
+          description: 繁體中文原因，例如「查無帳號」「帳號已停用」「不能邀請自己」「已在受邀名單中」
+    Suggestions:
+      type: object
+      description: 替代建議（沿用 003）。只在 violations 恰好只有 occupied 一項時出現；建議只是暫時產生的唯讀結果，不被保存，也不保留任何時段
+      required: [slots, noSlotsToday, venues]
+      properties:
+        slots:
+          $ref: "#/components/schemas/SlotSuggestions"
+        noSlotsToday:
+          type: boolean
+          description: slots 的 before 與 after 都是 null 時為 true；不跨日尋找
+        venues:
+          type: array
+          description: 同時段其他可用場地，已排好序（不需審核者在前、需審核者在後，各自依場地名稱排序），最多 5 個，沒有時為空陣列
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/VenueSuggestion"
+    SlotSuggestions:
+      type: object
+      description: 同場地空檔建議；同一台北日期、長度與所選相同
+      required: [before, after]
+      properties:
+        before:
+          oneOf:
+            - $ref: "#/components/schemas/SlotSuggestion"
+            - type: "null"
+          description: 開始時間早於所選、離所選開始時間最近的空檔；沒有時為 null
+        after:
+          oneOf:
+            - $ref: "#/components/schemas/SlotSuggestion"
+            - type: "null"
+          description: 開始時間晚於所選、離所選開始時間最近的空檔；沒有時為 null
+    SlotSuggestion:
+      type: object
+      description: 一個空檔建議；已通過一般單次預約的全部規則檢查（顯示當下）
+      required: [startAt, endAt]
+      properties:
+        startAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 空檔開始時間（UTC，帶 Z）；前端換算為台北日期與時分後顯示並填回表單
+        endAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 空檔結束時間（UTC，帶 Z）；當天結束的 24:00 對應台北隔日 00:00
+    VenueSuggestion:
+      type: object
+      description: 一個其他可用場地建議；只含場地公開欄位，不含任何占用者資訊
+      required: [venueId, name, capacity, requiresApproval]
+      properties:
+        venueId:
+          type: integer
+        name:
+          type: string
+          description: 場地名稱
+        capacity:
+          type: integer
+          description: 場地容納人數，不小於預約人數
+        requiresApproval:
+          type: boolean
+          description: 場地是否需審核；true 時前端標示「需審核」，送出後預約為 pending
+    TimeOfDay:
+      type: string
+      pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+      description: 台北當地時間 HH:mm
+    EndTimeOfDay:
+      type: string
+      pattern: "^(([01][0-9]|2[0-3]):[0-5][0-9]|24:00)$"
+      description: 台北當地時間 HH:mm，24:00 表示當日結束
+    BookingStatus:
+      type: string
+      enum:
+        [
+          pending,
+          confirmed,
+          checked_in,
+          completed,
+          rejected,
+          cancelled,
+          no_show,
+        ]
+      description: 待審核、已確認、已報到、已完成、已駁回、已取消、未到場
+    InvitationStatus:
+      type: string
+      enum: [pending, active, invalid]
+      description: 邀請狀態（不是預約狀態）：待發送（預約審核中尚未通知受邀者）、有效、已失效。待發送只能變為有效或已失效，已失效不再變更並保留最後的回覆（FR-026）。受邀者視角（Invitation）不會出現 pending
+    InvitationResponse:
+      type: string
+      enum: [none, accepted, declined]
+      description: 回覆狀態（有效邀請才有意義；失效後保留最後的回覆）：未回覆、已接受、已婉拒
+    InvitationReplyInput:
+      type: object
+      description: 回覆邀請的請求；請求不含員工編號或邀請識別（識別在路徑），身分只來自階段憑證
+      required: [response]
+      properties:
+        response:
+          type: string
+          enum: [accepted, declined]
+          description: accepted 為出席、declined 為不出席；不提供其他選項，也不附備註
+    Invitation:
+      type: object
+      description: 受邀者視角的邀請。只含預約者姓名、場地名稱與地點、日期、起訖、主題與自己的回覆，不含預約人數、場地容納人數、其他受邀者與其回覆
+      required:
+        [
+          id,
+          organizerName,
+          venueName,
+          venueLocation,
+          date,
+          startTime,
+          endTime,
+          startAt,
+          endAt,
+          subject,
+          bookingStatus,
+          bookingStarted,
+          status,
+          response,
+          canRespond,
+          cannotRespondReason,
+        ]
+      properties:
+        id:
+          type: integer
+          description: 邀請識別
+        organizerName:
+          type: string
+          description: 預約者姓名
+        venueName:
+          type: string
+        venueLocation:
+          type: string
+        date:
+          type: string
+          format: date
+          description: 台北當地日期
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        startAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 預約開始時間（UTC，帶 Z）；列表依它由早到晚排序
+        endAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 預約結束時間（UTC，帶 Z）
+        subject:
+          type: string
+        bookingStatus:
+          $ref: "#/components/schemas/BookingStatus"
+        bookingStarted:
+          type: boolean
+          description: 預約是否已開始（狀態為 checked_in、completed、no_show，或現在不早於開始時間）；由伺服器判定
+        status:
+          type: string
+          enum: [active, invalid]
+          description: 邀請狀態；待發送的邀請不會回給受邀者。invalid 時畫面標示「邀請已失效」並保留最後的回覆
+        response:
+          $ref: "#/components/schemas/InvitationResponse"
+        canRespond:
+          type: boolean
+          description: 目前是否可回覆（邀請 active、預約 confirmed 且尚未開始）；由伺服器依目前時間判定
+        cannotRespondReason:
+          oneOf:
+            - $ref: "#/components/schemas/InviteReason"
+            - type: "null"
+          description: canRespond 為 false 時的原因，判定順序見 getInvitation；canRespond 為 true 時為 null
+    InvitationList:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          description: 依預約開始時間由早到晚、再依邀請識別由小到大排序；不含待發送的邀請；不分頁
+          items:
+            $ref: "#/components/schemas/Invitation"
+        total:
+          type: integer
+          minimum: 0
+    InviteeItem:
+      type: object
+      description: 預約者視角名單中的一位受邀者
+      required: [invitationId, name, email, status, response, canRemove]
+      properties:
+        invitationId:
+          type: integer
+          description: 邀請識別，移除受邀者時使用
+        name:
+          type: string
+          description: 受邀者姓名
+        email:
+          type: string
+        status:
+          $ref: "#/components/schemas/InvitationStatus"
+        response:
+          $ref: "#/components/schemas/InvitationResponse"
+        canRemove:
+          type: boolean
+          description: 是否提供移除：預約可調整（canAdjust 為 true）且邀請為 pending 或 active 時為 true；已失效（含受邀者帳號停用）的邀請為 false
+    InviteeSummary:
+      type: object
+      description: 出席統計，由伺服器以同一個純函式計算；只計邀請狀態為 active 的邀請，pending 與 invalid 不計入
+      required: [invited, accepted, declined, noReply, expected]
+      properties:
+        invited:
+          type: integer
+          minimum: 0
+          description: 受邀人數（有效邀請的筆數）
+        accepted:
+          type: integer
+          minimum: 0
+        declined:
+          type: integer
+          minimum: 0
+        noReply:
+          type: integer
+          minimum: 0
+          description: 未回覆人數
+        expected:
+          type: integer
+          minimum: 1
+          description: 預計到場人數 = 1（預約者本人）加 accepted
+    BookingInvitees:
+      type: object
+      description: 預約者視角的受邀名單與出席統計；只有該預約的預約者能取得。attendees 與 venueCapacity 只並列提供，伺服器不比較、不提示、不推薦場地
+      required:
+        [
+          bookingId,
+          bookingStatus,
+          bookingStarted,
+          attendees,
+          venueCapacity,
+          items,
+          summary,
+          canAdjust,
+          adjustBlockedReason,
+        ]
+      properties:
+        bookingId:
+          type: integer
+        bookingStatus:
+          $ref: "#/components/schemas/BookingStatus"
+        bookingStarted:
+          type: boolean
+          description: 預約是否已開始（定義同 Invitation.bookingStarted）
+        attendees:
+          type: integer
+          description: 預約人數欄位的值，與受邀名單互相獨立，不要求相等
+        venueCapacity:
+          type: integer
+          description: 場地容納人數
+        items:
+          type: array
+          description: 名單；不含被預約者移除的邀請；沒有受邀者時為空陣列（畫面顯示「未邀請任何人」）
+          items:
+            $ref: "#/components/schemas/InviteeItem"
+        summary:
+          oneOf:
+            - $ref: "#/components/schemas/InviteeSummary"
+            - type: "null"
+          description: 預約狀態為 pending、cancelled、rejected，或 items 為空時為 null
+        canAdjust:
+          type: boolean
+          description: 是否可新增與移除受邀者（預約 pending 或 confirmed 且尚未開始）
+        adjustBlockedReason:
+          type: ["string", "null"]
+          enum: [booking_started, booking_cancelled, booking_rejected, null]
+          description: canAdjust 為 false 時的原因；canAdjust 為 true 時為 null
+    AddInviteesInput:
+      type: object
+      description: 新增受邀者的請求；不接受員工編號。同一 Email（不分大小寫、忽略前後空白）重複只算一位
+      required: [emails]
+      properties:
+        emails:
+          type: array
+          minItems: 1
+          items:
+            type: string
+    InviteesAdded:
+      type: object
+      description: 新增受邀者的結果
+      required: [addedCount, invitees]
+      properties:
+        addedCount:
+          type: integer
+          minimum: 1
+          description: 這次新增的人數（去除重複後）
+        invitees:
+          $ref: "#/components/schemas/BookingInvitees"
+    BookingInput:
+      type: object
+      description: 建立單次預約的請求；date、startTime、endTime 為台北當地日期與時分，不接受帶時區或偏移量的時間戳。請求不含員工編號，預約一律屬於目前登入者；再預約與一般預約格式相同，不含來源預約識別
+      required: [venueId, date, startTime, endTime, subject, attendees]
+      properties:
+        venueId:
+          type: integer
+        date:
+          type: string
+          format: date
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        subject:
+          type: string
+          maxLength: 100
+        attendees:
+          type: integer
+          minimum: 1
+        inviteeEmails:
+          type: array
+          description: 選填的受邀 Email 清單；只有建立單次預約讀取，週期性預約、候補與修改預約不讀取。伺服器去除前後空白、轉小寫並去除重複；不限數量，不與 attendees 或場地容納人數比較；省略或空陣列表示不邀請任何人
+          items:
+            type: string
+    Booking:
+      type: object
+      required:
+        [
+          id,
+          venueId,
+          venueName,
+          date,
+          startTime,
+          endTime,
+          startAt,
+          endAt,
+          subject,
+          attendees,
+          status,
+          lateCancel,
+        ]
+      properties:
+        id:
+          type: integer
+        venueId:
+          type: integer
+        venueName:
+          type: string
+        date:
+          type: string
+          format: date
+          description: 台北當地日期
+        startTime:
+          $ref: "#/components/schemas/TimeOfDay"
+        endTime:
+          $ref: "#/components/schemas/EndTimeOfDay"
+        startAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 開始時間（UTC，帶 Z）
+        endAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+          description: 結束時間（UTC，帶 Z）
+        subject:
+          type: string
+        attendees:
+          type: integer
+        status:
+          $ref: "#/components/schemas/BookingStatus"
+        lateCancel:
+          type: boolean
+        inviteeCount:
+          type: integer
+          minimum: 0
+          description: 本次建立預約時送出的受邀人數（去除重複後，沒有受邀者為 0）；預約為 confirmed 時表示已發送邀請的人數，為 pending 時表示核准後才會發送的人數。只有建立單次預約（createBooking）的回應帶此欄位，其他操作省略
+    Notification:
+      type: object
+      required:
+        [id, type, message, createdAt, read, bookingId, waitlistEntryId, invitationId]
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+          enum:
+            [
+              booking_created,
+              review_result,
+              waitlist_offer,
+              booking_cancelled,
+              review_pending,
+              booking_changed,
+              suspension,
+              waitlist_expired,
+              reminder,
+              invitation_received,
+              invitation_changed,
+              invitation_cancelled,
+              invitation_removed,
+              invitation_reminder,
+            ]
+          description: 前九種沿用 001；後五種為本功能新增：收到邀請、邀請變更（時間變更含新日期時間與新場地並說明回覆已重置，只換場地含新場地並說明回覆維持不變）、邀請取消（有取消原因時附上）、移出邀請、受邀提醒（含預約者姓名、主題、場地與開始時間）
+        message:
+          type: string
+          description: 事件發生當下組成的繁體中文內容，時間為台北時間
+        createdAt:
+          type: string
+          format: date-time
+          pattern: "Z$"
+        read:
+          type: boolean
+        bookingId:
+          type: ["integer", "null"]
+        waitlistEntryId:
+          type: ["integer", "null"]
+        invitationId:
+          type: ["integer", "null"]
+          description: 邀請相關通知所屬的邀請識別，供畫面前往邀請詳情；其餘通知為 null
+    NotificationList:
+      type: object
+      required: [items, total, unreadCount]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Notification"
+        total:
+          type: integer
+        unreadCount:
+          type: integer
+    NotificationReadResult:
+      type: object
+      required: [notification, unreadCount]
+      properties:
+        notification:
+          $ref: "#/components/schemas/Notification"
+        unreadCount:
+          type: integer

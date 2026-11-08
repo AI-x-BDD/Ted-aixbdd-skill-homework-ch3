@@ -1,5 +1,6 @@
 import {
   BOOKING_STATUS_LABELS,
+  INVITEE_PANEL_TEXT,
   REBOOK_TEXT,
 } from "../../../shared/src/copy.js";
 import { post } from "../api/client.js";
@@ -7,6 +8,7 @@ import { h } from "../lib/h.js";
 import { rebookState } from "../lib/rebook.js";
 import { formatDate, formatRange } from "../lib/time.js";
 import { openDialog } from "./dialog.js";
+import { createInviteePanel } from "./inviteePanel.js";
 import { showToast } from "./toast.js";
 
 const EDIT_WHY = {
@@ -168,7 +170,35 @@ export function bookingCard(booking, { onChanged, suspendedUntil } = {}) {
       }),
     );
   }
+  // 005 受邀者面板：單次預約才有（週期性場次不提供受邀者，FR-023）
+  let panel = null;
+  if (!booking.series) {
+    const panelId = `invitee-panel-${booking.id}`;
+    panel = createInviteePanel({ bookingId: booking.id, panelId });
+    panel.root.hidden = true;
+    let expanded = false;
+    const toggle = h("button", {
+      class: "btn sm",
+      type: "button",
+      testid: "invitee-panel-toggle",
+      "aria-expanded": "false",
+      "aria-controls": panelId,
+      text: INVITEE_PANEL_TEXT.toggle,
+      onClick: async () => {
+        expanded = !expanded;
+        toggle.setAttribute("aria-expanded", String(expanded));
+        panel.root.hidden = !expanded;
+        if (expanded) {
+          await panel.load();
+        }
+      },
+    });
+    slot.append(toggle);
+  }
   item.append(slot);
+  if (panel) {
+    item.append(panel.root);
+  }
   return item;
 }
 

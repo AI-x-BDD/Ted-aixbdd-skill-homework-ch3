@@ -1,7 +1,7 @@
 import { post } from "../api/client.js";
 import { h } from "../lib/h.js";
 import { startUnreadPolling } from "../lib/poller.js";
-import { REBOOK_TEXT } from "../../../shared/src/copy.js";
+import { INVITATION_TEXT, REBOOK_TEXT } from "../../../shared/src/copy.js";
 import { formatTaipei } from "../../../shared/src/taipei.js";
 import { currentUser } from "../router.js";
 
@@ -34,6 +34,11 @@ export function renderNav(activeHref = "") {
   const links = [
     { href: "#/venues", label: "場地" },
     { href: "#/bookings", label: "我的預約" },
+    {
+      href: "#/invitations",
+      label: INVITATION_TEXT.navLabel,
+      testid: "app-nav-invitations",
+    },
     { href: "#/waitlist", label: "候補" },
     { href: "#/notifications", label: "通知", badge: true },
   ];
@@ -54,6 +59,7 @@ export function renderNav(activeHref = "") {
     const a = h("a", {
       href: link.href,
       "aria-current": activeHref === link.href ? "page" : null,
+      testid: link.testid,
       text: link.label,
     });
     if (link.badge) {

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>我的邀請</title>
+    <link rel="stylesheet" href="proto.css" />
+  </head>
+  <body>
+    <script src="proto.js"></script>
+    <script src="invite-data.js"></script>
+    <script>
+      /* UI-02 我的邀請介面：列表 invitations.html；詳情 invitations.html?id=i1。
+         ?state=loading|empty|error；詳情錯誤 ?state=error（找不到）或 ?state=error&kind=load（載入失敗）；
+         回覆被拒絕 ?fail=started|cancelled|pending|invalid；回覆失敗 ?fail=network */
+      (function () {
+        var h = P.h,
+          q = P.q;
+        var main = P.shell("invitations.html");
+        // 假資料：目前使用者（陳小明）收到的邀請，發給本人且已發送或已失效；待發送者不出現
+        var DATA = [
+          { id: "i1", org: "林審核", venue: "大會議室", loc: "總公司 3F", date: "2026-11-09", s: "15:00", e: "16:00", subject: "季度規劃", inv: "valid", reply: "noreply", bstatus: "confirmed", started: false },
+          { id: "i2", org: "王管理", venue: "201 會議室", loc: "總公司 2F", date: "2026-11-10", s: "09:30", e: "10:30", subject: "資安教育訓練說明", inv: "valid", reply: "accepted", bstatus: "confirmed", started: false },
+          { id: "i3", org: "張雅婷", venue: "培訓教室", loc: "總公司 B1", date: "2026-11-12", s: "13:00", e: "15:00", subject: "新人說明會", inv: "valid", reply: "declined", bstatus: "confirmed", started: false },
+          { id: "i4", org: "李大華", venue: "小型討論室 A", loc: "總公司 2F", date: "2026-11-13", s: "11:00", e: "12:00", subject: "供應商報價討論", inv: "valid", reply: "accepted", bstatus: "pending", started: false },
+          { id: "i5", org: "周怡君", venue: "201 會議室", loc: "總公司 2F", date: "2026-11-11", s: "16:00", e: "17:00", subject: "客訴檢討", inv: "invalid", reply: "accepted", bstatus: "cancelled", started: false },
+          { id: "i6", org: "林審核", venue: "小型討論室 A", loc: "總公司 2F", date: "2026-11-07", s: "13:00", e: "14:00", subject: "專案進度同步", inv: "valid", reply: "accepted", bstatus: "checked_in", started: true },
+        ];
+        DATA.sort(function (a, b) {
+          return a.date + a.s < b.date + b.s ? -1 : 1;
+        });
+        var live = h("div", { class: "sr-only", role: "status", "aria-live": "polite", tid: "invitation-reply-result" });
+
+        function say(msg, err) {
+          live.textContent = msg;
+          P.toast(msg, err ? "error" : null);
+        }
+        // 能否回覆與原因（預約狀態一律依代碼判斷，C-SH-01）
+        function why(x) {
+          var gone = ["checked_in", "completed", "no_show"].indexOf(x.bstatus) >= 0;
+          if (x.started || gone) return "預約已開始，無法再回覆。";
+          if (x.bstatus === "cancelled" || x.bstatus === "rejected") return "預約已取消，無法回覆。";
+          if (x.bstatus === "pending") return "預約審核中，審核完成前無法回覆。";
+          if (x.inv === "invalid") return "邀請已失效，無法回覆。";
+          return null;
+        }
+        function tags(x) {
+          var w = h("span", { class: "row" }, P.replyTag(x.reply, "invitation-reply-tag"));
+          if (x.inv === "invalid") w.appendChild(h("span", { class: "tag danger", tid: "invitation-invalid-tag", text: "邀請已失效" }));
+          if (x.bstatus === "pending") w.appendChild(h("span", { class: "tag warn", tid: "invitation-pending-tag", text: "預約審核中" }));
+          if (x.started || ["checked_in", "completed", "no_show"].indexOf(x.bstatus) >= 0) w.appendChild(h("span", { class: "tag", tid: "invitation-started-tag", text: "預約已開始" }));
+          return w;
+        }
+        function link(id) {
+          return P.link("invitations.html", "id=" + id);
+        }
+
+        /* ---------- 列表 ---------- */
+        function listView() {
+          var root = h("div", { tid: "my-invitations" });
+          main.appendChild(root);
+          root.appendChild(P.header("我的邀請", "同事邀請你參加的會議，依開始時間由早到晚排列。"));
+          if (P.state === "loading") {
+            root.setAttribute("aria-busy", "true");
+            root.appendChild(P.skeleton(4, "my-invitations-loading"));
+            return;
+          }
+          if (P.state === "error") {
+            root.appendChild(P.stateBox("error", "my-invitations-error", "無法載入你的邀請", "無法載入你的邀請。請稍後按「重新載入」再試一次。", [P.reloadBtn()]));
+            return;
+          }
+          if (P.state === "empty") {
+            root.appendChild(P.stateBox("empty", "my-invitations-empty", "目前沒有邀請", "同事邀請你參加預約時，邀請會出現在這裡，也會收到站內通知。"));
+            return;
+          }
+          var ul = h("ul", { class: "list", tid: "invitation-list" });
+          DATA.forEach(function (x) {
+            var li = h("li", {
+              class: "item" + (x.inv === "invalid" ? " muted" : ""),
+              tid: "invitation-item",
+              "data-id": x.id,
+              "aria-label": x.venue + "，" + P.fmtSpan(x) + "，" + x.org + " 邀請你，我的回覆：" + P.REPLY[x.reply],
+            });
+            li.appendChild(h("div", { class: "top" }, h("span", { class: "title", text: x.venue }), tags(x)));
+            li.appendChild(h("div", { class: "meta wrap-any", text: x.org + " 邀請你" }));
+            li.appendChild(h("div", { class: "meta", text: P.fmtSpan(x) }));
+            li.appendChild(h("div", { class: "meta wrap-any", text: x.subject }));
+            li.appendChild(h("div", { class: "row" }, h("a", { class: "btn sm", tid: "invitation-open", href: link(x.id), text: "查看邀請" })));
+            ul.appendChild(li);
+          });
+          root.appendChild(ul);
+        }
+
+        /* ---------- 詳情 ---------- */
+        function detailView(id) {
+          var x = DATA.filter(function (d) {
+            return d.id === id;
+          })[0];
+          var root = h("div", { tid: "invitation-detail" });
+          main.appendChild(root);
+          root.appendChild(live);
+          root.appendChild(h("a", { class: "btn", tid: "invitation-back", href: P.link("invitations.html"), text: "返回我的邀請", style: "margin-bottom:12px" }));
+          root.appendChild(P.header("邀請詳情"));
+          if (P.state === "loading") {
+            root.setAttribute("aria-busy", "true");
+            root.appendChild(P.skeleton(3, "invitation-detail-loading"));
+            return;
+          }
+          if (P.state === "error" && q.get("kind") === "load") {
+            root.appendChild(P.stateBox("error", "invitation-detail-error", "無法載入邀請", "無法載入你的邀請。請稍後按「重新載入」再試一次。", [P.reloadBtn()]));
+            return;
+          }
+          if (!x || P.state === "error") {
+            root.appendChild(
+              P.stateBox("error", "invitation-detail-error", "找不到這份邀請", "找不到這份邀請。請回到「我的邀請」確認。", [
+                h("a", { class: "btn primary", href: P.link("invitations.html"), text: "回到我的邀請" }),
+              ]),
+            );
+            return;
+          }
+          var card = h("div", { class: "card" });
+          root.appendChild(card);
+          var body = h("div");
+          card.appendChild(body);
+
+          function draw() {
+            body.innerHTML = "";
+            body.appendChild(
+              h(
+                "div",
+                { class: "kv" },
+                h("div", { tid: "invitation-detail-organizer", text: "預約者：" + x.org }),
+                h("div", { tid: "invitation-detail-venue", text: "場地：" + x.venue + "（" + x.loc + "）" }),
+                h("div", { tid: "invitation-detail-time", text: "時間：" + P.fmtSpan(x) }),
+                h("div", { tid: "invitation-detail-subject", text: "主題：" + x.subject }),
+                h("div", { tid: "invitation-detail-reply", "aria-live": "polite", text: "我的回覆：" + P.REPLY[x.reply] }),
+              ),
+            );
+            body.appendChild(h("div", { class: "row" }, tags(x)));
+            if (x.inv === "invalid") body.appendChild(h("p", { class: "hint", text: "邀請已失效，以下為你最後的回覆。" }));
+            var reason = why(x);
+            var acc = h("button", { class: "btn", type: "button", tid: "invitation-reply-accept", "aria-pressed": String(x.reply === "accepted"), text: "出席", disabled: !!reason });
+            var dec = h("button", { class: "btn", type: "button", tid: "invitation-reply-decline", "aria-pressed": String(x.reply === "declined"), text: "不出席", disabled: !!reason });
+            body.appendChild(h("div", { class: "reply-row" }, acc, dec));
+            if (reason) {
+              var rEl = h("p", { class: "hint", id: "reply-why", tid: "invitation-reply-disabled-reason", text: reason });
+              body.appendChild(rEl);
+              acc.setAttribute("aria-describedby", "reply-why");
+              dec.setAttribute("aria-describedby", "reply-why");
+            }
+            var busyNow = false;
+            function reply(kind, btn) {
+              if (busyNow) return;
+              busyNow = true;
+              var label = btn.textContent;
+              acc.disabled = dec.disabled = true;
+              btn.textContent = "處理中…";
+              body.setAttribute("aria-busy", "true");
+              setTimeout(function () {
+                busyNow = false;
+                body.removeAttribute("aria-busy");
+                var f = q.get("fail");
+                if (f === "network") {
+                  say("無法送出你的回覆，回覆狀態沒有改變。請稍後再試一次。", true);
+                  btn.textContent = label;
+                  acc.disabled = dec.disabled = false;
+                  return;
+                }
+                var rejected = {
+                  started: ["預約已開始，回覆沒有成立。", { started: true }],
+                  cancelled: ["預約已取消，回覆沒有成立。", { bstatus: "cancelled" }],
+                  pending: ["預約審核中，回覆沒有成立。", { bstatus: "pending" }],
+                  invalid: ["邀請已失效，回覆沒有成立。", { inv: "invalid" }],
+                }[f];
+                if (rejected) {
+                  Object.assign(x, rejected[1]); // 重新取得最新狀態，回覆維持原樣
+                  say(rejected[0], true);
+                  draw();
+                  return;
+                }
+                x.reply = kind;
+                say(kind === "accepted" ? "已回覆出席" : "已回覆不出席");
+                draw();
+                (kind === "accepted" ? body.querySelector('[data-testid="invitation-reply-accept"]') : body.querySelector('[data-testid="invitation-reply-decline"]')).focus();
+              }, 450);
+            }
+            acc.addEventListener("click", function () {
+              reply("accepted", acc);
+            });
+            dec.addEventListener("click", function () {
+              reply("declined", dec);
+            });
+          }
+          draw();
+        }
+
+        var id = q.get("id");
+        if (id) detailView(id);
+        else listView();
+      })();
+    </script>
+  </body>
+</html>

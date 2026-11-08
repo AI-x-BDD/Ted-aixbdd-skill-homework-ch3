@@ -7,6 +7,7 @@ import { config } from "./config.js";
 import { pool } from "./db/pool.js";
 import { startScanner } from "./jobs/scanner.js";
 import "./jobs/reminders.js";
+import "./jobs/inviteeReminders.js";
 import "./jobs/reviewExpiry.js";
 import "./jobs/noShows.js";
 import "./jobs/completions.js";

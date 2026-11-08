@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>狀態入口：邀請與出席回覆</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f4f0;
+        --surface: #ffffff;
+        --surface-2: #ece8e2;
+        --text: #1d1b18;
+        --muted: #77716a;
+        --line: #e2dcd3;
+        --accent: #3157d5;
+        --ok: #1a7f4b;
+        --load: #3157d5;
+        --empty: #8a6d1f;
+        --error: #c9252d;
+        --shadow:
+          0 1px 2px rgba(45, 30, 15, 0.06), 0 8px 24px rgba(45, 30, 15, 0.08);
+        font-family:
+          -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC",
+          "Microsoft JhengHei", sans-serif;
+        color: var(--text);
+        -webkit-font-smoothing: antialiased;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #141312;
+          --surface: #1f1d1b;
+          --surface-2: #2b2825;
+          --text: #f3efe9;
+          --muted: #a29b92;
+          --line: #36322e;
+          --accent: #8aa4ff;
+          --ok: #4cc38a;
+          --load: #8aa4ff;
+          --empty: #e0b84f;
+          --error: #ff6b6b;
+          --shadow:
+            0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.35);
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+      }
+      main {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 56px 20px 64px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 34px;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+      }
+      h2 {
+        margin: 36px 0 12px;
+        padding-left: 4px;
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--muted);
+      }
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 6px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        box-shadow: var(--shadow);
+      }
+      a {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 14px 14px;
+        border-radius: 14px;
+        color: var(--text);
+        text-decoration: none;
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.45;
+        transition: background 0.15s;
+      }
+      a:hover {
+        background: var(--bg);
+      }
+      a::before {
+        content: "";
+        flex: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--ok);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 18%, transparent);
+      }
+      a[href*="state=loading"]::before {
+        background: var(--load);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--load) 18%, transparent);
+      }
+      a[href*="state=empty"]::before {
+        background: var(--empty);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--empty) 18%, transparent);
+      }
+      a[href*="state=error"]::before {
+        background: var(--error);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--error) 18%, transparent);
+      }
+      li + li {
+        border-top: 1px solid var(--line);
+      }
+      li:hover + li,
+      li:hover {
+        border-color: transparent;
+      }
+      code {
+        margin-left: auto;
+        padding: 3px 9px;
+        border-radius: 8px;
+        background: var(--surface-2);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+      button {
+        margin-top: 36px;
+        height: 42px;
+        padding: 0 20px;
+        border-radius: 99px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--text);
+        font: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      button:hover {
+        background: var(--surface-2);
+      }
+      :focus-visible {
+        outline: 3px solid var(--accent);
+        outline-offset: 2px;
+      }
+      @media (max-width: 520px) {
+        main {
+          padding-top: 32px;
+        }
+        h1 {
+          font-size: 28px;
+        }
+        a {
+          flex-wrap: wrap;
+          row-gap: 6px;
+        }
+        code {
+          margin-left: 24px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>狀態入口</h1>
+
+      <h2>UI-01 預約表單：邀請同事（booking-form.html）</h2>
+      <ul>
+        <li><a href="booking-form.html">成功：已填兩位同事 Email，可送出<code>booking-form.html</code></a></li>
+        <li><a href="booking-form.html?state=loading">載入<code>?state=loading</code></a></li>
+        <li><a href="booking-form.html?state=empty">空狀態：沒有邀請任何人<code>?state=empty</code></a></li>
+        <li><a href="booking-form.html?state=error">錯誤：查無帳號、帳號已停用、不能邀請自己<code>?state=error</code></a></li>
+        <li><a href="booking-form.html?state=error&amp;kind=rules">錯誤：時段被占用，Email 保留<code>?state=error&amp;kind=rules</code></a></li>
+        <li><a href="booking-form.html?state=error&amp;kind=network">錯誤：送出失敗<code>?state=error&amp;kind=network</code></a></li>
+        <li><a href="booking-form.html?mode=rebook&amp;state=empty">再預約一次：Email 為空白<code>?mode=rebook&amp;state=empty</code></a></li>
+        <li><a href="booking-form.html?recurring=1">勾選重複預約：欄位隱藏<code>?recurring=1</code></a></li>
+        <li><a href="booking-form.html?mode=edit">修改預約：沒有邀請欄位<code>?mode=edit</code></a></li>
+      </ul>
+
+      <h2>UI-02 我的邀請：列表（invitations.html）</h2>
+      <ul>
+        <li><a href="invitations.html">成功：六份邀請，含已失效、審核中、已開始<code>invitations.html</code></a></li>
+        <li><a href="invitations.html?state=loading">載入<code>?state=loading</code></a></li>
+        <li><a href="invitations.html?state=empty">空狀態：目前沒有邀請<code>?state=empty</code></a></li>
+        <li><a href="invitations.html?state=error">錯誤：載入失敗<code>?state=error</code></a></li>
+      </ul>
+
+      <h2>UI-02 我的邀請：邀請詳情與回覆</h2>
+      <ul>
+        <li><a href="invitations.html?id=i1">成功：未回覆，可回覆出席或不出席<code>?id=i1</code></a></li>
+        <li><a href="invitations.html?id=i1&amp;state=loading">載入<code>?id=i1&amp;state=loading</code></a></li>
+        <li><a href="invitations.html?id=i1&amp;state=error">錯誤：找不到這份邀請<code>?id=i1&amp;state=error</code></a></li>
+        <li><a href="invitations.html?id=i1&amp;state=error&amp;kind=load">錯誤：詳情載入失敗<code>&amp;kind=load</code></a></li>
+        <li><a href="invitations.html?id=i1&amp;fail=network">回覆失敗（網路）<code>?id=i1&amp;fail=network</code></a></li>
+        <li><a href="invitations.html?id=i1&amp;fail=cancelled">回覆被拒絕：預約已取消<code>&amp;fail=cancelled</code></a></li>
+        <li><a href="invitations.html?id=i1&amp;fail=started">回覆被拒絕：預約已開始<code>&amp;fail=started</code></a></li>
+        <li><a href="invitations.html?id=i1&amp;fail=pending">回覆被拒絕：預約審核中<code>&amp;fail=pending</code></a></li>
+        <li><a href="invitations.html?id=i1&amp;fail=invalid">回覆被拒絕：邀請已失效<code>&amp;fail=invalid</code></a></li>
+        <li><a href="invitations.html?id=i4">不可回覆：預約審核中<code>?id=i4</code></a></li>
+        <li><a href="invitations.html?id=i5">不可回覆：邀請已失效並保留最後回覆<code>?id=i5</code></a></li>
+        <li><a href="invitations.html?id=i6">不可回覆：預約已開始<code>?id=i6</code></a></li>
+      </ul>
+
+      <h2>UI-03 受邀者面板（bookings.html）</h2>
+      <ul>
+        <li><a href="bookings.html?open=b1">成功：已確認，統計、並列人數與名單<code>?open=b1</code></a></li>
+        <li><a href="bookings.html?state=loading">載入<code>?state=loading</code></a></li>
+        <li><a href="bookings.html?state=empty">空狀態：未邀請任何人<code>?state=empty</code></a></li>
+        <li><a href="bookings.html?state=error">錯誤：面板載入失敗<code>?state=error</code></a></li>
+        <li><a href="bookings.html?state=error&amp;kind=forbidden">錯誤：非本人預約<code>?state=error&amp;kind=forbidden</code></a></li>
+        <li><a href="bookings.html?open=b2">待審核：名單為待發送，無統計<code>?open=b2</code></a></li>
+        <li><a href="bookings.html?open=b5&amp;tab=past">已開始：可查看，不可調整<code>?open=b5&amp;tab=past</code></a></li>
+        <li><a href="bookings.html?open=b6&amp;tab=past">已取消：邀請已失效，無統計<code>?open=b6&amp;tab=past</code></a></li>
+        <li><a href="bookings.html?open=b1&amp;addtext=dahua%40example.com%2C%20nobody%40example.com%2C%20chen%40example.com">新增含有問題的 Email<code>?addtext=…</code></a></li>
+        <li><a href="bookings.html?open=b1&amp;fail=started">新增或移除被拒絕：預約已開始<code>&amp;fail=started</code></a></li>
+        <li><a href="bookings.html?open=b1&amp;fail=cancelled">新增或移除被拒絕：預約已取消<code>&amp;fail=cancelled</code></a></li>
+        <li><a href="bookings.html?open=b1&amp;fail=network">新增、移除與重新整理失敗<code>&amp;fail=network</code></a></li>
+      </ul>
+
+      <h2>UI-04 邀請通知（notifications.html）</h2>
+      <ul>
+        <li><a href="notifications.html">成功：五種邀請通知與「查看邀請」連結<code>notifications.html</code></a></li>
+        <li><a href="notifications.html?state=loading">載入<code>?state=loading</code></a></li>
+        <li><a href="notifications.html?state=empty">空狀態<code>?state=empty</code></a></li>
+        <li><a href="notifications.html?state=error">錯誤：載入失敗<code>?state=error</code></a></li>
+        <li><a href="notifications.html?markfail=1">錯誤：標記已讀失敗<code>?markfail=1</code></a></li>
+      </ul>
+    </main>
+  </body>
+</html>
